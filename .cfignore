@@ -1,0 +1,7 @@
+/node_modules/*
+/_archive/*
+/.smoke-build/*
+/tests/*
+/game/*
+/components/*
+/app/*

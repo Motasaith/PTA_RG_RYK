@@ -1,0 +1,466 @@
+import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { clamp, damp, fwdX, fwdZ, rgtX, rgtZ } from './mathx';
+import { Box, KIND, Physics } from './physics';
+import { Humanoid } from './humanoid';
+
+export type VehKind = 'sedan' | 'hatch' | 'suv' | 'van' | 'sports' | 'police' | 'rickshaw';
+
+export interface VehSpec {
+  maxSpeed: number;      // m/s
+  reverseMax: number;
+  accel: number;
+  brake: number;
+  /** lateral grip: higher = less slide */
+  grip: number;
+  driftGrip: number;
+  wheelbase: number;
+  maxSteer: number;
+  halfL: number;
+  halfW: number;
+  height: number;
+  wheelR: number;
+  seat: [number, number, number];
+  camBack: number;
+  camUp: number;
+  mass: number;
+  name: string;
+}
+
+export const SPECS: Record<VehKind, VehSpec> = {
+  sedan:    { maxSpeed: 33, reverseMax: 9, accel: 11, brake: 22, grip: 7.5, driftGrip: 1.6, wheelbase: 2.7, maxSteer: 0.55, halfL: 2.2, halfW: 0.95, height: 1.5, wheelR: 0.34, seat: [-0.42, 0.62, 0.25], camBack: 7.4, camUp: 3, mass: 1300, name: 'SEDAN' },
+  hatch:    { maxSpeed: 30, reverseMax: 9, accel: 10, brake: 21, grip: 7.2, driftGrip: 1.6, wheelbase: 2.4, maxSteer: 0.6, halfL: 1.95, halfW: 0.9, height: 1.55, wheelR: 0.32, seat: [-0.4, 0.64, 0.2], camBack: 7, camUp: 3, mass: 1100, name: 'HATCHBACK' },
+  suv:      { maxSpeed: 31, reverseMax: 9, accel: 10.5, brake: 20, grip: 6.6, driftGrip: 1.5, wheelbase: 2.9, maxSteer: 0.5, halfL: 2.35, halfW: 1.05, height: 1.85, wheelR: 0.4, seat: [-0.46, 0.82, 0.3], camBack: 8, camUp: 3.4, mass: 1900, name: 'SUV' },
+  van:      { maxSpeed: 26, reverseMax: 8, accel: 8, brake: 18, grip: 6, driftGrip: 1.4, wheelbase: 3.2, maxSteer: 0.46, halfL: 2.6, halfW: 1.1, height: 2.1, wheelR: 0.38, seat: [-0.5, 0.95, 0.7], camBack: 9, camUp: 3.8, mass: 2100, name: 'VAN' },
+  sports:   { maxSpeed: 44, reverseMax: 10, accel: 17, brake: 26, grip: 9, driftGrip: 1.9, wheelbase: 2.6, maxSteer: 0.52, halfL: 2.15, halfW: 1, height: 1.25, wheelR: 0.34, seat: [-0.4, 0.5, 0.15], camBack: 7.2, camUp: 2.6, mass: 1250, name: 'SPORTS' },
+  police:   { maxSpeed: 38, reverseMax: 10, accel: 14, brake: 24, grip: 8.4, driftGrip: 1.8, wheelbase: 2.8, maxSteer: 0.56, halfL: 2.25, halfW: 0.98, height: 1.55, wheelR: 0.35, seat: [-0.42, 0.64, 0.25], camBack: 7.6, camUp: 3.1, mass: 1450, name: 'POLICE CRUISER' },
+  rickshaw: { maxSpeed: 18, reverseMax: 6, accel: 7, brake: 14, grip: 5, driftGrip: 1.3, wheelbase: 1.9, maxSteer: 0.75, halfL: 1.5, halfW: 0.7, height: 1.75, wheelR: 0.3, seat: [0, 0.6, 0.1], camBack: 6, camUp: 3, mass: 500, name: 'RICKSHAW' },
+};
+
+export interface VehicleControl {
+  throttle: number;   // 0..1
+  brake: number;      // 0..1
+  /** −1..1, where +1 steers RIGHT (the D key). Right turns decrease yaw — see mathx.ts. */
+  steer: number;
+  handbrake: boolean;
+}
+
+export interface Vehicle {
+  kind: VehKind;
+  spec: VehSpec;
+  group: THREE.Group;
+  wheelMeshes: { mesh: THREE.Object3D; front: boolean }[];
+  bodyPivot: THREE.Group;
+  brakeLight: THREE.Mesh | null;
+  lightbar: { l: THREE.Mesh; r: THREE.Mesh } | null;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  /** world velocity */
+  vx: number;
+  vz: number;
+  /** signed forward speed */
+  speed: number;
+  steerAngle: number;
+  wheelSpin: number;
+  health: number;
+  ctrl: VehicleControl;
+  driver: Humanoid | null;
+  isPlayer: boolean;
+  siren: boolean;
+  box: Box;
+  /** traffic AI state (null once a human takes the wheel) */
+  ai: null | { from: number; to: number; t: number; wait: number; chase: boolean };
+  hornT: number;
+  crashT: number;
+  bodyRoll: number;
+  bodyPitch: number;
+}
+
+/* ── model ────────────────────────────────────────────────────────────────── */
+
+let bodyMat: THREE.MeshStandardMaterial | null = null;
+let glassMat: THREE.MeshStandardMaterial | null = null;
+let lightMat: THREE.MeshStandardMaterial | null = null;
+let brakeMat: THREE.MeshStandardMaterial | null = null;
+
+function mats() {
+  if (!bodyMat) {
+    bodyMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.32, metalness: 0.42 });
+    glassMat = new THREE.MeshStandardMaterial({ color: 0x14202b, roughness: 0.08, metalness: 0.2, transparent: true, opacity: 0.72 });
+    lightMat = new THREE.MeshStandardMaterial({ color: 0xfff4d0, emissive: 0xfff0c0, emissiveIntensity: 1.4, roughness: 0.3 });
+    brakeMat = new THREE.MeshStandardMaterial({ color: 0x8c1a10, emissive: 0xff2200, emissiveIntensity: 0.35, roughness: 0.4 });
+  }
+  return { bodyMat: bodyMat!, glassMat: glassMat!, lightMat: lightMat!, brakeMat: brakeMat! };
+}
+
+function paint(geo: THREE.BufferGeometry, hex: number): THREE.BufferGeometry {
+  const c = new THREE.Color(hex);
+  const n = geo.attributes.position.count;
+  const arr = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { arr[i * 3] = c.r; arr[i * 3 + 1] = c.g; arr[i * 3 + 2] = c.b; }
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(arr, 3));
+  geo.deleteAttribute('uv');
+  return geo;
+}
+
+function pbox(w: number, h: number, d: number, hex: number, x = 0, y = 0, z = 0, rx = 0): THREE.BufferGeometry {
+  const g = paint(new THREE.BoxGeometry(w, h, d), hex);
+  if (rx) g.rotateX(rx);
+  g.translate(x, y, z);
+  return g;
+}
+
+/** Squeeze the top face of a box so cabins and bonnets get a real car silhouette. */
+function taper(g: THREE.BufferGeometry, sx: number, sz: number, aboveY: number): THREE.BufferGeometry {
+  const p = g.attributes.position as THREE.BufferAttribute;
+  for (let i = 0; i < p.count; i++) {
+    if (p.getY(i) > aboveY) {
+      p.setX(i, p.getX(i) * sx);
+      p.setZ(i, p.getZ(i) * sz);
+    }
+  }
+  p.needsUpdate = true;
+  g.computeVertexNormals();
+  return g;
+}
+
+function wheel(r: number, width: number): THREE.Group {
+  const g = new THREE.Group();
+  const tyre = paint(new THREE.CylinderGeometry(r, r, width, 14), 0x15171a);
+  tyre.rotateZ(Math.PI / 2);
+  const rim = paint(new THREE.CylinderGeometry(r * 0.58, r * 0.58, width + 0.012, 10), 0x9aa2aa);
+  rim.rotateZ(Math.PI / 2);
+  const spokes: THREE.BufferGeometry[] = [];
+  for (let i = 0; i < 5; i++) {
+    const s = paint(new THREE.BoxGeometry(width + 0.02, r * 0.9, 0.05), 0x767d85);
+    s.rotateX((i / 5) * Math.PI);
+    spokes.push(s);
+  }
+  const merged = mergeGeometries([tyre, rim, ...spokes], false)!;
+  const m = new THREE.Mesh(merged, mats().bodyMat);
+  m.castShadow = true;
+  g.add(m);
+  return g;
+}
+
+export function createVehicle(kind: VehKind, colour: number): Vehicle {
+  const spec = SPECS[kind];
+  const M = mats();
+  const group = new THREE.Group();
+  const bodyPivot = new THREE.Group();
+  group.add(bodyPivot);
+
+  const L = spec.halfL, W = spec.halfW, wr = spec.wheelR;
+  const sillY = wr * 0.85;
+  const parts: THREE.BufferGeometry[] = [];
+  const dark = 0x1b1e22;
+
+  if (kind === 'rickshaw') {
+    parts.push(pbox(W * 1.9, 0.5, L * 1.5, colour, 0, sillY + 0.3, -0.2));
+    parts.push(taper(pbox(W * 1.8, 0.9, L * 1.2, colour, 0, sillY + 1, -0.3), 0.8, 0.85, 0.2));
+    parts.push(pbox(W * 1.4, 0.6, 0.5, dark, 0, sillY + 0.55, L * 0.9));
+    parts.push(pbox(0.1, 0.5, 0.1, dark, 0, sillY + 0.9, L * 0.75));
+  } else {
+    // chassis + sills
+    parts.push(pbox(W * 2, 0.34, L * 2 - 0.2, colour, 0, sillY + 0.17, 0));
+    // bonnet and boot, slightly tapered
+    parts.push(taper(pbox(W * 1.94, 0.34, L * 0.78, colour, 0, sillY + 0.5, L * 0.55), 0.94, 1, 0));
+    parts.push(taper(pbox(W * 1.94, 0.34, L * 0.6, colour, 0, sillY + 0.5, -L * 0.68), 0.96, 1, 0));
+    // cabin
+    const cabH = kind === 'van' ? 1.1 : kind === 'suv' ? 0.92 : kind === 'sports' ? 0.62 : 0.78;
+    const cabD = kind === 'van' ? L * 1.25 : L * 0.95;
+    const cab = taper(pbox(W * 1.86, cabH, cabD, colour, 0, sillY + 0.34 + cabH / 2, kind === 'van' ? 0 : -L * 0.12), 0.88, 0.82, 0);
+    parts.push(cab);
+    // roof edge
+    parts.push(pbox(W * 1.6, 0.06, cabD * 0.82, colour, 0, sillY + 0.34 + cabH, kind === 'van' ? 0 : -L * 0.12));
+    // bumpers + grille + arches
+    parts.push(pbox(W * 2.02, 0.24, 0.2, dark, 0, sillY + 0.22, L - 0.06));
+    parts.push(pbox(W * 2.02, 0.24, 0.2, dark, 0, sillY + 0.22, -L + 0.06));
+    parts.push(pbox(W * 1.5, 0.16, 0.1, dark, 0, sillY + 0.46, L - 0.02));
+    for (const sx of [-1, 1]) {
+      for (const sz of [1, -1]) {
+        parts.push(pbox(0.12, 0.3, wr * 2.5, dark, sx * W * 1.02, sillY + 0.3, sz * spec.wheelbase / 2));
+      }
+      parts.push(pbox(0.1, 0.16, 0.24, dark, sx * (W * 1.02 + 0.05), sillY + 0.75, L * 0.42));  // mirrors
+      parts.push(pbox(0.03, 0.06, L * 1.1, dark, sx * W * 1.01, sillY + 0.42, -L * 0.1));       // door line
+    }
+    parts.push(pbox(0.06, 0.06, 0.3, dark, W * 0.6, sillY + 0.02, -L + 0.02));                  // exhaust
+    if (kind === 'van') parts.push(pbox(W * 1.5, 0.08, L * 1.1, 0x9aa2aa, 0, sillY + 0.34 + cabH + 0.1, 0));
+    if (kind === 'sports') parts.push(pbox(W * 1.7, 0.06, 0.3, dark, 0, sillY + 0.72, -L + 0.1)); // spoiler
+  }
+
+  const bodyMesh = new THREE.Mesh(mergeGeometries(parts, false)!, M.bodyMat);
+  bodyMesh.castShadow = true;
+  bodyMesh.receiveShadow = true;
+  bodyPivot.add(bodyMesh);
+
+  // glazing
+  if (kind !== 'rickshaw') {
+    const cabH = kind === 'van' ? 1.1 : kind === 'suv' ? 0.92 : kind === 'sports' ? 0.62 : 0.78;
+    const zc = kind === 'van' ? 0 : -L * 0.12;
+    const cabD = kind === 'van' ? L * 1.25 : L * 0.95;
+    const glassParts: THREE.BufferGeometry[] = [
+      paint(new THREE.BoxGeometry(W * 1.6, cabH * 0.8, 0.06), 0xffffff),
+      paint(new THREE.BoxGeometry(W * 1.55, cabH * 0.7, 0.06), 0xffffff),
+      paint(new THREE.BoxGeometry(0.06, cabH * 0.62, cabD * 0.72), 0xffffff),
+      paint(new THREE.BoxGeometry(0.06, cabH * 0.62, cabD * 0.72), 0xffffff),
+    ];
+    glassParts[0].rotateX(-0.42);
+    glassParts[0].translate(0, sillY + 0.34 + cabH * 0.55, zc + cabD / 2 - 0.1);
+    glassParts[1].rotateX(0.5);
+    glassParts[1].translate(0, sillY + 0.34 + cabH * 0.55, zc - cabD / 2 + 0.1);
+    glassParts[2].translate(-W * 0.9, sillY + 0.34 + cabH * 0.6, zc);
+    glassParts[3].translate(W * 0.9, sillY + 0.34 + cabH * 0.6, zc);
+    const gm = new THREE.Mesh(mergeGeometries(glassParts, false)!, M.glassMat);
+    bodyPivot.add(gm);
+  }
+
+  // lamps
+  const head: THREE.BufferGeometry[] = [];
+  const tail: THREE.BufferGeometry[] = [];
+  for (const sx of [-1, 1]) {
+    const h = new THREE.BoxGeometry(0.34, 0.14, 0.08);
+    h.translate(sx * W * 1.2, sillY + 0.46, L - 0.02);
+    head.push(h);
+    const t = new THREE.BoxGeometry(0.3, 0.14, 0.08);
+    t.translate(sx * W * 1.2, sillY + 0.5, -L + 0.02);
+    tail.push(t);
+  }
+  const headMesh = new THREE.Mesh(mergeGeometries(head, false)!, M.lightMat);
+  const brakeMesh = new THREE.Mesh(mergeGeometries(tail, false)!, M.brakeMat.clone());
+  bodyPivot.add(headMesh, brakeMesh);
+
+  // police lightbar
+  let lightbar: Vehicle['lightbar'] = null;
+  if (kind === 'police') {
+    const barY = sillY + 0.34 + 0.78 + 0.12;
+    const base = new THREE.Mesh(paint(new THREE.BoxGeometry(W * 1.5, 0.08, 0.34), 0x111417), M.bodyMat);
+    base.position.set(0, barY, -L * 0.1);
+    const mkLamp = (sx: number, colour2: number) => {
+      const m = new THREE.Mesh(
+        new THREE.BoxGeometry(W * 0.62, 0.14, 0.3),
+        new THREE.MeshStandardMaterial({ color: colour2, emissive: colour2, emissiveIntensity: 0, roughness: 0.3, transparent: true, opacity: 0.9 }),
+      );
+      m.position.set(sx * W * 0.42, barY + 0.1, -L * 0.1);
+      return m;
+    };
+    const l = mkLamp(-1, 0x2244ff), r = mkLamp(1, 0xff2222);
+    bodyPivot.add(base, l, r);
+    lightbar = { l, r };
+    // white door panels
+    for (const sx of [-1, 1]) {
+      const p = new THREE.Mesh(paint(new THREE.BoxGeometry(0.04, 0.5, L * 0.9), 0xf2f2f2), M.bodyMat);
+      p.position.set(sx * (W * 1.01 + 0.01), sillY + 0.42, -L * 0.1);
+      bodyPivot.add(p);
+    }
+  }
+
+  // wheels
+  const wheelMeshes: Vehicle['wheelMeshes'] = [];
+  const wb = spec.wheelbase / 2;
+  const positions: [number, number, boolean][] = kind === 'rickshaw'
+    ? [[0, wb, true], [-W * 0.9, -wb, false], [W * 0.9, -wb, false]]
+    : [[-W * 1.02, wb, true], [W * 1.02, wb, true], [-W * 1.02, -wb, false], [W * 1.02, -wb, false]];
+  for (const [wx, wz, front] of positions) {
+    const w = wheel(wr, 0.22);
+    w.position.set(wx, wr, wz);
+    group.add(w);
+    wheelMeshes.push({ mesh: w, front });
+  }
+
+  const v: Vehicle = {
+    kind, spec, group, wheelMeshes, bodyPivot,
+    brakeLight: brakeMesh, lightbar,
+    x: 0, y: 0, z: 0, yaw: 0, vx: 0, vz: 0, speed: 0, steerAngle: 0, wheelSpin: 0,
+    health: 100,
+    ctrl: { throttle: 0, brake: 0, steer: 0, handbrake: false },
+    driver: null, isPlayer: false, siren: false,
+    box: { minX: 0, maxX: 0, minZ: 0, maxZ: 0, bottom: 0, top: spec.height, kind: KIND.Vehicle },
+    ai: null, hornT: 0, crashT: 0, bodyRoll: 0, bodyPitch: 0,
+  };
+  v.box.owner = v;
+  return v;
+}
+
+export function placeVehicle(v: Vehicle, x: number, z: number, yaw: number): void {
+  v.x = x; v.z = z; v.yaw = yaw;
+  v.vx = 0; v.vz = 0; v.speed = 0;
+  v.group.position.set(x, v.y, z);
+  v.group.rotation.y = yaw;
+}
+
+/** World-space AABB, refreshed every frame so other bodies can collide with it. */
+export function updateVehicleBox(v: Vehicle): void {
+  const s = Math.abs(Math.sin(v.yaw)), c = Math.abs(Math.cos(v.yaw));
+  const rx = s * v.spec.halfL + c * v.spec.halfW;
+  const rz = c * v.spec.halfL + s * v.spec.halfW;
+  v.box.minX = v.x - rx; v.box.maxX = v.x + rx;
+  v.box.minZ = v.z - rz; v.box.maxZ = v.z + rz;
+  v.box.bottom = v.y;
+  v.box.top = v.y + v.spec.height;
+}
+
+/**
+ * Bicycle-model arcade physics.
+ *
+ * Forward speed is driven directly; lateral velocity is bled off by grip, which is what
+ * produces believable understeer, handbrake slides and the inability to turn on the spot.
+ */
+export function stepVehicle(v: Vehicle, dt: number, phys: Physics): void {
+  const s = v.spec;
+  const c = v.ctrl;
+
+  // ── longitudinal
+  const throttle = clamp(c.throttle, 0, 1), brake = clamp(c.brake, 0, 1);
+  if (throttle > 0) {
+    const headroom = 1 - clamp(v.speed / s.maxSpeed, 0, 1);
+    v.speed += s.accel * throttle * (0.35 + headroom * 0.65) * dt;
+  }
+  if (brake > 0) {
+    if (v.speed > 0.4) v.speed -= s.brake * brake * dt;
+    else v.speed -= s.accel * 0.65 * brake * dt;
+  }
+  if (c.handbrake) v.speed -= Math.sign(v.speed) * s.brake * 0.55 * dt;
+  // rolling resistance + drag
+  v.speed -= v.speed * (0.55 + Math.abs(v.speed) * 0.022) * dt;
+  if (!throttle && !brake && Math.abs(v.speed) < 0.25) v.speed = 0;
+  v.speed = clamp(v.speed, -s.reverseMax, s.maxSpeed);
+
+  // ── steering: less lock at speed, and none at all when stationary
+  const speedFactor = 1 / (1 + Math.abs(v.speed) * 0.055);
+  const target = c.steer * s.maxSteer * speedFactor;
+  v.steerAngle = damp(v.steerAngle, target, 9, dt);
+  // steering right (+) turns the car right, which decreases yaw
+  const yawRate = -(v.speed / s.wheelbase) * Math.tan(v.steerAngle) * (c.handbrake ? 1.45 : 1);
+  v.yaw += yawRate * dt;
+
+  // ── velocity split into forward / lateral, lateral bled off by grip
+  const fx = fwdX(v.yaw), fz = fwdZ(v.yaw);
+  const rx = rgtX(v.yaw), rz = rgtZ(v.yaw);
+  let vf = v.vx * fx + v.vz * fz;
+  let vs = v.vx * rx + v.vz * rz;
+  vf = damp(vf, v.speed, 14, dt);
+  const grip = c.handbrake ? s.driftGrip : s.grip;
+  vs *= Math.exp(-grip * dt);
+  // sliding scrubs speed
+  v.speed -= Math.min(Math.abs(v.speed), Math.abs(vs) * 0.35 * dt);
+  v.vx = fx * vf + rx * vs;
+  v.vz = fz * vf + rz * vs;
+
+  // ── integrate, sub-stepped so nothing is driven through a wall
+  const dist = Math.hypot(v.vx, v.vz) * dt;
+  const steps = Math.max(1, Math.ceil(dist / 0.35));
+  const sdt = dt / steps;
+  for (let i = 0; i < steps; i++) {
+    v.x += v.vx * sdt;
+    v.z += v.vz * sdt;
+    collide(v, phys);
+  }
+
+  // ── ride height follows the ground (kerbs, driveways)
+  const gh = phys.groundHeight(v.x, v.z, s.halfW, v.y + 0.6, false);
+  v.y = damp(v.y, gh, 12, dt);
+
+  // ── visuals
+  v.wheelSpin += (v.speed / s.wheelR) * dt;
+  for (const w of v.wheelMeshes) {
+    // local +Y rotation turns the wheel left, so negate to point it where we steer
+    if (w.front) w.mesh.rotation.y = -v.steerAngle;
+    w.mesh.children[0].rotation.x = v.wheelSpin;
+    w.mesh.position.y = s.wheelR;
+  }
+  // sliding right (+lateral) leans the body left, which is a negative Z rotation
+  const lateral = clamp((v.vx * rx + v.vz * rz) * 0.06, -0.22, 0.22);
+  v.bodyRoll = damp(v.bodyRoll, lateral, 8, dt);
+  v.bodyPitch = damp(v.bodyPitch, clamp((throttle - brake) * -0.035 + (c.handbrake ? 0.03 : 0), -0.08, 0.08), 7, dt);
+  v.bodyPivot.rotation.z = v.bodyRoll;
+  v.bodyPivot.rotation.x = v.bodyPitch;
+  v.group.position.set(v.x, v.y, v.z);
+  v.group.rotation.y = v.yaw;
+
+  if (v.brakeLight) {
+    const m = v.brakeLight.material as THREE.MeshStandardMaterial;
+    m.emissiveIntensity = brake > 0.05 || (c.handbrake && Math.abs(v.speed) > 0.5) ? 2.2 : 0.25;
+  }
+  v.crashT = Math.max(0, v.crashT - dt);
+  v.hornT = Math.max(0, v.hornT - dt);
+  updateVehicleBox(v);
+}
+
+/** Four corner probes: cheap, stable, and it lets cars grind along walls instead of sticking. */
+function collide(v: Vehicle, phys: Physics): void {
+  const s = v.spec;
+  const fx = fwdX(v.yaw), fz = fwdZ(v.yaw);
+  const rx = rgtX(v.yaw), rz = rgtZ(v.yaw);
+  let pushX = 0, pushZ = 0, torque = 0, hits = 0;
+  const probe = 0.52;
+  for (const [lz, lx] of [[1, 1], [1, -1], [-1, 1], [-1, -1]] as [number, number][]) {
+    const ox = (s.halfL - probe * 0.8) * lz, oz = (s.halfW - probe * 0.7) * lx;
+    const px = v.x + fx * ox + rx * oz;
+    const pz = v.z + fz * ox + rz * oz;
+    phys.resolveCircle(px, pz, probe, v.y + 0.15, v.y + s.height, 0.3, true, v);
+    if (!phys.outHit) continue;
+    const dx = phys.outX - px, dz = phys.outZ - pz;
+    pushX += dx; pushZ += dz; hits++;
+    torque += ox * (dz * fz + dx * fx) * 0 + (ox * dz - oz * dx) * 0.06;
+  }
+  if (!hits) return;
+  v.x += pushX / hits;
+  v.z += pushZ / hits;
+  v.yaw += clamp(torque, -0.12, 0.12);
+  // kill the velocity component going into the wall
+  const n = Math.hypot(pushX, pushZ);
+  if (n > 1e-5) {
+    const nx = pushX / n, nz = pushZ / n;
+    const into = v.vx * nx + v.vz * nz;
+    if (into < 0) {
+      v.vx -= nx * into * 1.4;
+      v.vz -= nz * into * 1.4;
+    }
+    const impact = Math.abs(v.speed);
+    if (impact > 4) {
+      v.crashT = 0.35;
+      v.health -= (impact - 4) * 1.6;
+    }
+    v.speed *= impact > 8 ? 0.25 : 0.6;
+  }
+}
+
+export function vehicleSpeedKmh(v: Vehicle): number {
+  return Math.abs(Math.round(v.speed * 3.6));
+}
+
+/** Flash the police lightbar. */
+export function updateSiren(v: Vehicle, t: number): void {
+  if (!v.lightbar) return;
+  const on = v.siren;
+  const a = on ? (Math.sin(t * 12) > 0 ? 1 : 0) : 0;
+  (v.lightbar.l.material as THREE.MeshStandardMaterial).emissiveIntensity = a * 3;
+  (v.lightbar.r.material as THREE.MeshStandardMaterial).emissiveIntensity = (on ? 1 - a : 0) * 3;
+}
+
+/** Driver seat in world space. seat[0] is negative → right-hand drive, as in Pakistan. */
+export function seatWorld(v: Vehicle, out: THREE.Vector3): THREE.Vector3 {
+  const [sx, sy, sz] = v.spec.seat;
+  return out.set(
+    v.x + rgtX(v.yaw) * -sx + fwdX(v.yaw) * sz,
+    v.y + sy,
+    v.z + rgtZ(v.yaw) * -sx + fwdZ(v.yaw) * sz,
+  );
+}
+
+export function lerpColour(a: number, b: number, t: number): number {
+  const ca = new THREE.Color(a), cb = new THREE.Color(b);
+  return ca.lerp(cb, t).getHex();
+}
+
+export const CAR_COLOURS = [
+  0xb8342a, 0x1f3f7a, 0xe8e8e6, 0x2b2f33, 0x8a9096, 0x2e7d52,
+  0xd8a12c, 0x6a4a8a, 0x1d6f7a, 0xc4c9cd, 0x7a3b2a, 0xf0f2f4,
+];
+
+export function pickSpec(kinds: VehKind[], r: number): VehKind {
+  return kinds[Math.floor(r * kinds.length) % kinds.length];
+}

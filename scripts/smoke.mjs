@@ -1,0 +1,60 @@
+/**
+ * Headless test runner.
+ *
+ * The game logic (physics, city generation, AI, vehicle handling) is deliberately free of
+ * WebGL calls, so it can be executed in plain Node with a stubbed <canvas>. This script
+ * compiles the game modules to ESM, then runs every test in tests/.
+ *
+ *   npm test
+ */
+import { execFileSync } from 'node:child_process';
+import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const OUT = '.smoke-build';
+const MODULES = [
+  'mathx', 'settings', 'physics', 'materials', 'sky', 'city', 'humanoid',
+  'weapons', 'vehicle', 'peds', 'traffic', 'combat', 'minimap', 'hudstore',
+  'camerarig', 'audio', 'input',
+];
+
+rmSync(OUT, { recursive: true, force: true });
+mkdirSync(OUT, { recursive: true });
+
+console.log('compiling game modules…');
+execFileSync(
+  process.execPath,
+  [
+    join('node_modules', 'typescript', 'bin', 'tsc'),
+    ...MODULES.map((m) => `game/${m}.ts`),
+    '--outDir', OUT,
+    '--module', 'esnext',
+    '--moduleResolution', 'bundler',
+    '--target', 'es2022',
+    '--skipLibCheck',
+    '--strict', 'false',
+  ],
+  { stdio: 'inherit' },
+);
+
+// Node needs explicit extensions on relative ESM imports; tsc does not add them.
+for (const f of readdirSync(OUT).filter((f) => f.endsWith('.js'))) {
+  const p = join(OUT, f);
+  writeFileSync(p, readFileSync(p, 'utf8').replace(/from '(\.\/[\w-]+)'/g, "from '$1.js'"));
+}
+writeFileSync(join(OUT, 'package.json'), '{ "type": "module" }');
+
+for (const f of readdirSync('tests').filter((f) => f.endsWith('.mjs'))) {
+  cpSync(join('tests', f), join(OUT, f));
+}
+
+let failed = 0;
+for (const f of readdirSync(OUT).filter((f) => f.endsWith('.mjs'))) {
+  console.log(`\n=== ${f} ===`);
+  try {
+    execFileSync(process.execPath, [join(OUT, f)], { stdio: 'inherit' });
+  } catch {
+    failed++;
+  }
+}
+process.exit(failed ? 1 : 0);

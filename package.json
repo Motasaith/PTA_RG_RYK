@@ -1,0 +1,29 @@
+{
+  "name": "rahim-garden-city",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Open-world browser game (Next.js + three.js), static-exported for Cloudflare.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "preview": "npx --yes serve out",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/smoke.mjs",
+    "cf:deploy": "npm run build && npx --yes wrangler pages deploy out",
+    "cf:preview": "npm run build && npx --yes wrangler pages dev out",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "^14.2.35",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "three": "0.160.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.0",
+    "@types/react": "18.3.3",
+    "@types/react-dom": "18.3.0",
+    "@types/three": "0.160.0",
+    "typescript": "5.5.4"
+  }
+}

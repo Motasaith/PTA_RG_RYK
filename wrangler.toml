@@ -1,0 +1,4 @@
+# Cloudflare Pages — the game is a fully static bundle, no server runtime needed.
+name = "rahim-garden-city"
+compatibility_date = "2025-01-01"
+pages_build_output_dir = "out"
