@@ -4,10 +4,12 @@ import { KIND, Physics } from './physics';
 import { chance, mulberry32, pick, ri, rr, Rng } from './mathx';
 import { QualityPreset } from './settings';
 import {
-  bench, bindProps, Builder, cart, City, connect, lamp, LANE_OFF, LEFT_HAND_TRAFFIC, LOT_Y,
-  MinimapData, newCollect, PAINT_Y, Poi, RoadNode, ROAD_Y, Shop, tree, WALK_Y, WorldBounds,
+  bench, bindProps, Builder, cart, chaiStall, charpai, City, connect, lamp, LANE_OFF,
+  LEFT_HAND_TRAFFIC, LOT_Y, MinimapData, newCollect, PAINT_Y, Poi, powerLine, RoadNode,
+  ROAD_Y, Shop, tandoor, tree, WALK_Y, WorldBounds,
 } from './layout';
 import { buildScheme } from './scheme';
+import { AoGrid } from './ao';
 
 /* The geometry batcher, street furniture and shared types live in layout.ts. They are
    re-exported here so the rest of the game can keep importing "the map" from one place. */
@@ -198,6 +200,9 @@ export function buildCity(scene: THREE.Scene, phys: Physics, mats: Mats, preset:
       ]);
 
       streetFurniture(B, phys, mats, rng, cx, cz, preset, lampPts, pickupSpots);
+      // overhead cables down the north pavement of every block
+      const cableZ = cz - HALF_BLOCK + SIDEWALK * 0.42;
+      powerLine(B, phys, cx - HALF_BLOCK + 11, cableZ, cx + HALF_BLOCK - 11, cableZ, 26);
 
       switch (type) {
         case 'plaza': plaza(B, phys, mats, rng, cx, cz, itemSpots, pois, minimap); break;
@@ -281,7 +286,12 @@ export function buildCity(scene: THREE.Scene, phys: Physics, mats: Mats, preset:
     B.box(mats.foliage, bounds.maxX + 1, WALK_Y + 0.9, z, 1.6, 1.8, 8, 0, 3);
   }
 
-  B.finish(root);
+  /* ── bake ambient occlusion ──────────────────────────────────────────── */
+  // Voxelise what we just built, then bake per-vertex occlusion into the merged meshes.
+  // Zero runtime cost: it is only vertex colours.
+  const ao = new AoGrid(bounds);
+  for (const b of phys.boxes) ao.addBox(b);
+  B.finish(root, ao);
   for (const s of signMeshes) root.add(s);
   phys.build();
 
@@ -422,12 +432,16 @@ function shopRow(
 ): void {
   B.quad(mats.concrete, cx, LOT_Y, cz, CORE, CORE, 4);
   const NAMES: [string, Shop['kind'], string][] = [
-    ['KIRYANA STORE', 'health', '#2e8b57'],
-    ['BIRYANI HOUSE', 'health', '#b3564e'],
-    ['CHAI DHABA', 'health', '#8a5a33'],
+    ['ZAM ZAM KIRYANA STORE', 'health', '#2e8b57'],
+    ['AL-HABIB TANDOOR & NAAN', 'health', '#b3564e'],
+    ['QUETTA CHAI HOTEL', 'health', '#8a5a33'],
     ['AL-NOOR HARDWARE', 'ammo', '#2b5aa0'],
-    ['SWEETS & BAKERY', 'health', '#c96a86'],
-    ['MOBILE MARKET', 'ammo', '#4a5a6a'],
+    ['MADINA SWEETS & BAKERY', 'health', '#c96a86'],
+    ['SHAHEEN MOBILE & EASYLOAD', 'ammo', '#4a5a6a'],
+    ['BISMILLAH BIRYANI', 'health', '#a8451f'],
+    ['NEW PUNCTURE SHOP', 'ammo', '#3f4a52'],
+    ['GUJRANWALA CLOTH HOUSE', 'health', '#7a3b8a'],
+    ['CHAMAN FRUIT & SABZI', 'health', '#1f7a4a'],
   ];
   // four shop units, each facing outward on its own side of the block
   const sides: [number, number, number][] = [
@@ -474,6 +488,10 @@ function shopRow(
     const vx = cx + rr(rng, -12, 12), vz = cz + (i ? 1 : -1) * (HALF_CORE - 17);
     cart(B, phys, vx, vz, i ? Math.PI : 0);
   }
+  // the bazaar's real fixtures: a tandoor, a chai stall and a charpai to wait on
+  tandoor(B, phys, cx - HALF_CORE + 8, cz - 2);
+  chaiStall(B, phys, cx + HALF_CORE - 9, cz + 3, Math.PI / 2);
+  charpai(B, phys, cx + HALF_CORE - 9, cz - 4, 1);
 }
 
 

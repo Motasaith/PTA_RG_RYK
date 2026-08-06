@@ -79,6 +79,10 @@ export function Hud({
           <div className="speedo">
             <div className="kmh">{hud.speed}</div>
             <div className="kmhlabel">KM/H · {hud.vehicleName}</div>
+            <div className={`boostbar${hud.boosting ? ' live' : ''}`}>
+              <i style={{ width: `${Math.round(hud.boost * 100)}%` }} />
+            </div>
+            <div className="boostlabel">SHIFT · NITROUS</div>
           </div>
         ) : (
           <div className="weapon">

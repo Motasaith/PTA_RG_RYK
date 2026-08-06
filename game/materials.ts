@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { mulberry32, Rng } from './mathx';
+import { createWaterMaterial } from './water';
 
 /**
  * Every surface in the game is generated on a <canvas> at load time. No image downloads,
@@ -202,6 +203,67 @@ export const tex = {
     }
   }),
 
+  /**
+   * Truck art. Every Bedford on a Pakistani road is a moving painting: bands of hot colour,
+   * floral rosettes, mirrored chips, poetry panels and a scalloped crown. This draws the
+   * grammar of it — symmetrical bands, rosettes, teardrop petals, chrome strips.
+   */
+  truckArt: () => make('truckart', 512, (g, rng, s) => {
+    const hot = ['#d62828', '#1d64c4', '#f6c445', '#12965a', '#e8621f', '#8e3fb0', '#00a3a3'];
+    g.fillStyle = '#f7f0dc';
+    g.fillRect(0, 0, s, s);
+    // horizontal colour bands
+    let y = 0;
+    while (y < s) {
+      const h = 18 + rng() * 46;
+      g.fillStyle = hot[(rng() * hot.length) | 0];
+      g.fillRect(0, y, s, h);
+      // chrome pinstripe between bands
+      g.fillStyle = 'rgba(255,255,255,.72)';
+      g.fillRect(0, y + h - 3, s, 3);
+      g.fillStyle = 'rgba(0,0,0,.22)';
+      g.fillRect(0, y + h, s, 2);
+      y += h + 2;
+    }
+    // rosettes, mirrored left/right the way real panels are
+    const rosette = (cx: number, cy: number, r: number) => {
+      const petals = 8 + ((rng() * 4) | 0);
+      const c1 = hot[(rng() * hot.length) | 0];
+      for (let i = 0; i < petals; i++) {
+        const a = (i / petals) * Math.PI * 2;
+        g.fillStyle = i % 2 ? c1 : '#f7f0dc';
+        g.beginPath();
+        g.ellipse(cx + Math.cos(a) * r * 0.55, cy + Math.sin(a) * r * 0.55, r * 0.42, r * 0.2, a, 0, Math.PI * 2);
+        g.fill();
+      }
+      g.fillStyle = '#f6c445';
+      g.beginPath(); g.arc(cx, cy, r * 0.26, 0, 7); g.fill();
+      g.fillStyle = '#d62828';
+      g.beginPath(); g.arc(cx, cy, r * 0.12, 0, 7); g.fill();
+    };
+    for (let i = 0; i < 7; i++) {
+      const cy = 40 + rng() * (s - 80), r = 26 + rng() * 30;
+      rosette(s * 0.25, cy, r);
+      rosette(s * 0.75, cy, r);
+    }
+    // teardrop petal borders top and bottom
+    for (let x = 8; x < s; x += 26) {
+      for (const [py, dir] of [[10, 1], [s - 10, -1]] as [number, number][]) {
+        g.fillStyle = hot[(x / 26 | 0) % hot.length];
+        g.beginPath();
+        g.moveTo(x, py);
+        g.quadraticCurveTo(x + 13, py + dir * 20, x + 26, py);
+        g.fill();
+      }
+    }
+    // mirrored chips catching the light
+    for (let i = 0; i < 90; i++) {
+      g.fillStyle = `rgba(255,255,255,${0.35 + rng() * 0.5})`;
+      const cx = rng() * s, cy = rng() * s, r = 2 + rng() * 4;
+      g.beginPath(); g.arc(cx, cy, r, 0, 7); g.fill();
+    }
+  }),
+
   foliage: () => make('foliage', 128, (g, rng, s) => {
     g.fillStyle = '#3f7238';
     g.fillRect(0, 0, s, s);
@@ -211,6 +273,126 @@ export const tex = {
     }
   }),
 };
+
+/**
+ * Derive a normal map from an albedo texture with a Sobel filter on its luminance.
+ *
+ * Real relief needs a real height field, but for brick, plaster, kerbs and asphalt the
+ * albedo *is* essentially a height field — mortar lines are dark, aggregate is light. One
+ * extra texture sample per pixel buys grazing-light detail that no amount of geometry
+ * would give us, and it costs nothing to author.
+ */
+function deriveNormal(src: THREE.Texture, key: string, strength = 1.4): THREE.Texture {
+  const hit = cache.get('n:' + key);
+  if (hit) return hit;
+  const img = src.image as HTMLCanvasElement;
+  const s = img.width;
+  const sg = img.getContext('2d')!;
+  const px = sg.getImageData(0, 0, s, s).data;
+  const lum = new Float32Array(s * s);
+  for (let i = 0; i < s * s; i++) {
+    lum[i] = (px[i * 4] * 0.299 + px[i * 4 + 1] * 0.587 + px[i * 4 + 2] * 0.114) / 255;
+  }
+  const out = document.createElement('canvas');
+  out.width = out.height = s;
+  const og = out.getContext('2d')!;
+  const dst = og.createImageData(s, s);
+  const at = (x: number, y: number) => lum[((y + s) % s) * s + ((x + s) % s)];
+  for (let y = 0; y < s; y++) {
+    for (let x = 0; x < s; x++) {
+      // Sobel
+      const gx = (at(x + 1, y - 1) + 2 * at(x + 1, y) + at(x + 1, y + 1))
+               - (at(x - 1, y - 1) + 2 * at(x - 1, y) + at(x - 1, y + 1));
+      const gy = (at(x - 1, y + 1) + 2 * at(x, y + 1) + at(x + 1, y + 1))
+               - (at(x - 1, y - 1) + 2 * at(x, y - 1) + at(x + 1, y - 1));
+      let nx = -gx * strength, ny = -gy * strength, nz = 1;
+      const l = Math.hypot(nx, ny, nz) || 1;
+      nx /= l; ny /= l; nz /= l;
+      const i = (y * s + x) * 4;
+      dst.data[i] = (nx * 0.5 + 0.5) * 255;
+      dst.data[i + 1] = (ny * 0.5 + 0.5) * 255;
+      dst.data[i + 2] = (nz * 0.5 + 0.5) * 255;
+      dst.data[i + 3] = 255;
+    }
+  }
+  og.putImageData(dst, 0, 0);
+  const t = new THREE.CanvasTexture(out);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.anisotropy = maxAniso;
+  cache.set('n:' + key, t);
+  return t;
+}
+
+/**
+ * Tileable ripple normal map, built analytically from a few sine octaves so the gradients
+ * are exact and it tiles seamlessly (frequencies are whole numbers of cycles per edge).
+ */
+export function rippleNormal(size = 256): THREE.Texture {
+  const hit = cache.get('ripple');
+  if (hit) return hit;
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const g = c.getContext('2d')!;
+  const img = g.createImageData(size, size);
+  // [cycles-x, cycles-y, amplitude]
+  const waves: [number, number, number][] = [
+    [3, 1, 1], [1, 4, 0.8], [5, 3, 0.45], [2, 7, 0.3], [9, 6, 0.14],
+  ];
+  const TAU2 = Math.PI * 2;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let dx = 0, dy = 0;
+      for (const [fx, fy, a] of waves) {
+        const phase = TAU2 * (fx * x / size + fy * y / size);
+        dx += a * fx * Math.cos(phase);
+        dy += a * fy * Math.cos(phase);
+      }
+      let nx = -dx * 0.055, ny = -dy * 0.055, nz = 1;
+      const l = Math.hypot(nx, ny, nz);
+      nx /= l; ny /= l; nz /= l;
+      const i = (y * size + x) * 4;
+      img.data[i] = (nx * 0.5 + 0.5) * 255;
+      img.data[i + 1] = (ny * 0.5 + 0.5) * 255;
+      img.data[i + 2] = (nz * 0.5 + 0.5) * 255;
+      img.data[i + 3] = 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  cache.set('ripple', t);
+  return t;
+}
+
+/**
+ * Wind sway, injected into the foliage material's vertex shader.
+ *
+ * A vertex-shader-only change on one already-merged mesh: no extra draw calls, no extra
+ * geometry, no CPU work per frame beyond a single uniform write. Sway ramps in with height
+ * so trunks stay put and canopies move.
+ */
+function addSway(m: THREE.MeshStandardMaterial): void {
+  m.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = { value: 0 };
+    m.userData.shader = shader;
+    shader.vertexShader = `uniform float uTime;
+` + shader.vertexShader.replace(
+      '#include <begin_vertex>',
+      `#include <begin_vertex>
+      float swayAmt = smoothstep(1.1, 4.2, transformed.y);
+      float swayPh = transformed.x * 0.26 + transformed.z * 0.33;
+      transformed.x += sin(uTime * 1.25 + swayPh) * 0.08 * swayAmt;
+      transformed.z += cos(uTime * 0.98 + swayPh * 1.4) * 0.065 * swayAmt;
+      transformed.y += sin(uTime * 1.6 + swayPh * 0.7) * 0.018 * swayAmt;`,
+    );
+  };
+}
+
+/** One uniform write a frame drives every leaf in the world. */
+export function updateFoliage(m: THREE.Material, t: number): void {
+  const sh = (m.userData as { shader?: { uniforms: Record<string, { value: number }> } }).shader;
+  if (sh) sh.uniforms.uTime.value = t;
+}
 
 /** Soft radial sprite used for muzzle flash, lamp glow, blood mist and dust. */
 export function glowTexture(): THREE.Texture {
@@ -330,7 +512,7 @@ export interface Mats {
   metal: THREE.MeshStandardMaterial;
   wood: THREE.MeshStandardMaterial;
   glass: THREE.MeshStandardMaterial;
-  water: THREE.MeshStandardMaterial;
+  water: THREE.ShaderMaterial;
   trunk: THREE.MeshStandardMaterial;
   foliage: THREE.MeshStandardMaterial;
   plaster: THREE.MeshStandardMaterial[];
@@ -338,25 +520,34 @@ export interface Mats {
 }
 
 export function buildMaterials(): Mats {
-  const std = (o: THREE.MeshStandardMaterialParameters) => new THREE.MeshStandardMaterial(o);
+  // vertexColors carries the baked ambient occlusion (see ao.ts) on every static surface
+  const std = (o: THREE.MeshStandardMaterialParameters) => new THREE.MeshStandardMaterial({ vertexColors: true, ...o });
+  /** albedo + a normal map derived from it, in one go */
+  const bumpy = (key: string, t: THREE.Texture, strength: number, o: THREE.MeshStandardMaterialParameters) => std({
+    map: t,
+    normalMap: deriveNormal(t, key, strength),
+    normalScale: new THREE.Vector2(0.85, 0.85),
+    ...o,
+  });
+  const foliageMat = bumpy('foliage', tex.foliage(), 1, { roughness: 0.9 });
+  addSway(foliageMat);
   return {
-    asphalt: std({ map: tex.asphalt(), roughness: 0.95, metalness: 0.02 }),
+    asphalt: bumpy('asphalt', tex.asphalt(), 0.8, { roughness: 0.95, metalness: 0.02 }),
     paint: std({ color: 0xd8cf9a, roughness: 0.7 }),
-    concrete: std({ map: tex.concrete(), roughness: 0.9 }),
+    concrete: bumpy('concrete', tex.concrete(), 1.5, { roughness: 0.9 }),
     curb: std({ color: 0xbdb8ad, roughness: 0.85 }),
-    grass: std({ map: tex.grass(), roughness: 1 }),
-    dirt: std({ map: tex.dirt(), roughness: 1 }),
-    brick: std({ map: tex.brick(), roughness: 0.92 }),
-    roof: std({ map: tex.roofTile(), roughness: 0.85 }),
-    metal: std({ map: tex.metal(), roughness: 0.45, metalness: 0.6 }),
-    wood: std({ map: tex.wood(), roughness: 0.8 }),
+    grass: bumpy('grass', tex.grass(), 0.5, { roughness: 1 }),
+    dirt: bumpy('dirt', tex.dirt(), 0.9, { roughness: 1 }),
+    brick: bumpy('brick', tex.brick(), 2.6, { roughness: 0.92 }),
+    roof: bumpy('rooftile', tex.roofTile(), 2.2, { roughness: 0.85 }),
+    metal: bumpy('metal', tex.metal(), 0.7, { roughness: 0.45, metalness: 0.6 }),
+    wood: bumpy('wood', tex.wood(), 1.2, { roughness: 0.8 }),
     glass: std({ color: 0x8fbcd4, roughness: 0.08, metalness: 0.1, transparent: true, opacity: 0.42 }),
-    water: std({ map: tex.water(), roughness: 0.15, metalness: 0.25, transparent: true, opacity: 0.82 }),
+    water: createWaterMaterial(),
     trunk: std({ color: 0x6b4a2f, roughness: 0.95 }),
-    foliage: std({ map: tex.foliage(), roughness: 0.9 }),
-    plaster: [0, 1, 2, 3, 4, 5].map((v) => std({ map: tex.plaster(v), roughness: 0.85 })),
-    facade: [0, 1, 2, 3].map((v) => std({
-      map: tex.facade(v),
+    foliage: foliageMat,
+    plaster: [0, 1, 2, 3, 4, 5].map((v) => bumpy('plaster' + v, tex.plaster(v), 1.1, { roughness: 0.85 })),
+    facade: [0, 1, 2, 3].map((v) => bumpy('facade' + v, tex.facade(v), 1.8, {
       emissiveMap: tex.facadeLit(v),
       emissive: new THREE.Color(0xffffff),
       emissiveIntensity: 0,

@@ -73,6 +73,13 @@ separate aim sensitivity and invert-Y.
   plot in seven is still vacant with a PLOT AVAILABLE board — encircled plots are
   available, as the banner says. You live on plot 34.
 
+  Both districts are dressed as Pakistani streets, not American ones: overhead power
+  lines sagging between timber poles with transformer drums, flat roofs with water
+  tanks, satellite dishes and washing out to dry, charpais in the courtyards,
+  tandoors and chai stalls on the corners, handcarts, boundary walls with gate
+  pillars and sunshades over every window, and bazaar signage that reads
+  ZAM ZAM KIRYANA STORE and QUETTA CHAI HOTEL rather than generic shopfronts.
+
   **Rahim Garden City** (north) is invented, and supplies what a plot scheme has
   no room for: 5x5 blocks of downtown towers, shop rows with signage, a
   supermarket, a police station, a mosque, parks with a pond and a cricket pitch,
@@ -90,15 +97,50 @@ separate aim sensitivity and invert-Y.
   pursue. Break line of sight for ~15 s to lose them. Standing next to an
   officer unarmed gets you **BUSTED** (fine + drop-off at the station); dying
   gets you **WASTED** (clinic fee).
-- **Vehicles** — sedan, hatchback, SUV, van, sports, police cruiser, rickshaw.
+- **Vehicles** — nine classes on a real performance ladder, from a 76 km/h
+  rickshaw to a 338 km/h hypercar:
+
+  | | rickshaw | truck | van | hatch | SUV | sedan | police | muscle | sports | hyper |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | top km/h | 76 | 86 | 130 | 155 | 166 | 180 | 205 | 223 | 256 | **338** |
+  | 0–100 | — | — | 9.2s | 6.6s | 5.8s | 4.8s | 3.7s | 3.0s | 2.3s | **1.6s** |
+
+  The truck is a **Bedford jingle truck** — six wheels, a carved crown over the cab,
+  mudflaps, a chain fringe along the tailgate, and painted panels using a procedural
+  truck-art texture (colour bands, mirrored rosettes, teardrop petal borders and
+  mirror chips). It is 8.6 m long and handles like it.
+
+  Hold **Shift** for nitrous — a few seconds of extra pull that also lifts the rev
+  limit (sports 256 → 294, hyper 338 → 408 km/h), then recharges. Aero drag is
+  derived from each class's top speed, so the quoted number is the real terminal
+  velocity, and a tyre cornering limit caps the turn rate with speed: a hypercar
+  at 330 km/h cannot pivot like a shopping trolley, but parking is still sharp.
   Parked cars can be stolen; the driver is animated at the wheel and leans with
-  the suspension.
+  the suspension. Police burn nitrous to close a gap, so a hypercar is fast but
+  not a free pass.
 - **Economy & missions** — Mom's list of 8 objectives with map beacons; cash,
   ammo, health and armour pickups; shops selling food (health) and ammo (which
   also unlock the SMG and shotgun).
 - **Presentation** — shader sky dome with day/night cycle, sun-following soft
   shadows, procedural PBR textures with world-space-constant tiling, lit windows
-  and street lamps after dark, rotating radar plus a full map.
+  and street lamps after dark, rotating radar plus a full map. Plus a visual pass
+  that is deliberately **free at runtime** — no post-processing chain, no second
+  scene render, nothing that a laptop on battery will notice:
+
+  - **Baked ambient occlusion.** The collision boxes are voxelised at load and
+    per-vertex occlusion is written into the merged geometry's vertex colours:
+    inside corners darken, undersides of eaves and balconies darken, and
+    everything gets a contact shadow where it meets the ground. Cost at runtime:
+    zero. It is just vertex colours.
+  - **Derived normal maps.** A Sobel filter over each canvas texture's luminance
+    becomes its normal map, so brick, plaster, kerbs and asphalt catch grazing
+    light. One extra texture sample per pixel.
+  - **Water** — two scrolling samples of a procedural ripple normal map, Fresnel
+    (near-transparent looking down, mirror-like at grazing angles), the live sky
+    colour as its reflection, a tight sun glint and a wide sheen. One pass.
+  - **Wind.** A vertex-shader hook on the already-merged foliage mesh sways
+    canopies and leaves trunks still. One uniform write a frame for every tree in
+    the world.
 
 ## Architecture
 
@@ -138,6 +180,17 @@ Choices worth knowing about:
 - **Movement is sub-stepped.** Steps are subdivided by distance travelled, so
   nothing tunnels through a wall at any frame rate, and every smoothing call is
   exponential (frame-rate independent).
+- **Pretty is not the same as expensive.** Every visual upgrade above is either
+  baked at load time (AO), authored into a texture (normal maps), or a handful of
+  instructions in a shader that was already running (water, wind). There is no
+  EffectComposer, no SSAO pass, no planar reflection and no shadow cascade,
+  because the target is an ordinary laptop during a coffee break, not a GPU
+  benchmark.
+- **Quoted numbers have to be true.** A vehicle's `maxSpeed` is calibrated
+  against its own aero drag so it is the actual terminal velocity — the tests
+  drive every class flat out for 90 seconds and check. This started as a bug:
+  rolling resistance grew linearly with speed and swamped the engine, so *every*
+  car in the game topped out at 39 km/h regardless of its spec.
 - **Nothing is scattered at random.** Both districts place props against an
   explicit zoning rule — the city against its road/pavement/lot bands, the scheme
   against its plan-derived plot rows — and the tests assert that no building,
@@ -152,6 +205,12 @@ Choices worth knowing about:
   all read the same key edge, so acting on a press consumes it. Without that,
   tapping E in a car exits the vehicle and the interaction pass immediately puts
   you back in — a bug that looks like "E doesn't work".
+- **The camera and the character are coupled.** The head and chest track where the
+  camera is looking (split between neck and spine, because turning the head alone
+  past ~70° looks like an owl), and standing still with the camera swung round
+  behind you makes the character shuffle to face it. GTA does not auto-rotate the
+  on-foot camera either — what was actually missing was the character *looking*
+  where you look.
 - **Aiming is analytic.** Bullets come from a hand-written ray against the
   collision grid and character spheres — the player is never a candidate, and the
   camera sits over the right shoulder, so the crosshair cannot land on your own

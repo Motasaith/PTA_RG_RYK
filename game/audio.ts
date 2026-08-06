@@ -130,6 +130,11 @@ export class GameAudio {
   cash(): void { [880, 1180].forEach((f, i) => this.tone('triangle', f, f * 1.2, 0.1, 0.08, i * 0.08)); }
   deny(): void { this.tone('square', 180, 120, 0.16, 0.08); }
   ui(): void { this.tone('sine', 660, 660, 0.04, 0.05); }
+  boost(): void {
+    this.burst(0.45, 0.16, 1600, 0.9, 'highpass');
+    this.tone('sawtooth', 180, 620, 0.4, 0.07);
+  }
+
   horn(): void { this.tone('square', 400, 395, 0.32, 0.13); this.tone('square', 300, 297, 0.32, 0.1); }
   crash(mag: number): void {
     const v = clamp(mag / 18, 0.15, 1);

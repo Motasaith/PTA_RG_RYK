@@ -160,6 +160,15 @@ export class Sky {
     return;
   }
 
+  /** Live zenith/horizon colours (no clone — these are read every frame by the water). */
+  topColour(): THREE.Color {
+    return this.uni.uTop.value as THREE.Color;
+  }
+
+  horizonColour(): THREE.Color {
+    return this.uni.uHorizon.value as THREE.Color;
+  }
+
   fogColor(): THREE.Color {
     return (this.uni.uHorizon.value as THREE.Color).clone();
   }

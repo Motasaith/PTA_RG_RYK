@@ -315,3 +315,29 @@ input[type="range"]::-moz-range-thumb {
   .ammo { font-size: 20px; }
   input[type="range"] { width: 120px; }
 }
+
+/* nitrous meter under the speedometer */
+.boostbar {
+  margin-top: 6px;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, .12);
+  overflow: hidden;
+}
+.boostbar > i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #4be1c0, #7df3ff);
+  transition: width .12s linear;
+}
+.boostbar.live > i {
+  background: linear-gradient(90deg, #ffd166, #ff8a3d);
+  box-shadow: 0 0 10px rgba(255, 160, 60, .8);
+}
+.boostlabel {
+  margin-top: 3px;
+  font-size: 9px;
+  letter-spacing: .14em;
+  opacity: .45;
+}

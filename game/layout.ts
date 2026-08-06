@@ -3,6 +3,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { Mats, uvScale, uvScaleBox } from './materials';
 import { KIND, Physics } from './physics';
 import { Rng } from './mathx';
+import { AoGrid } from './ao';
 
 /**
  * Shared layout toolkit: the geometry batcher, the street furniture and the data types
@@ -148,9 +149,17 @@ export class Builder {
     this.push(mat, g, x, y, z, rotY);
   }
 
-  /** Flat horizontal quad (roads, lot ground, paint). */
+  /**
+   * Flat horizontal quad (roads, lot ground, paint).
+   *
+   * Subdivided on a ~4m grid when it is big enough to matter: baked AO is per-vertex, so a
+   * single 64m quad with four corners cannot show a kerb's contact shadow. The extra
+   * triangles are free — they merge into the same batch.
+   */
   quad(mat: THREE.Material, x: number, y: number, z: number, w: number, d: number, tile = 4, rotY = 0): void {
-    const g = new THREE.PlaneGeometry(w, d);
+    const sw = w > 7 ? Math.min(24, Math.round(w / 4)) : 1;
+    const sd = d > 7 ? Math.min(24, Math.round(d / 4)) : 1;
+    const g = new THREE.PlaneGeometry(w, d, sw, sd);
     if (tile > 0) uvScale(g, w / tile, d / tile);
     this.push(mat, g, x, y, z, rotY, -Math.PI / 2);
   }
@@ -197,11 +206,13 @@ export class Builder {
     }
   }
 
-  finish(root: THREE.Group): void {
+  /** Merge every batch into one mesh per material, baking AO into vertex colours. */
+  finish(root: THREE.Group, ao?: AoGrid): void {
     for (const [mat, list] of this.groups) {
       if (!list.length) continue;
       const merged = mergeGeometries(list, false);
       if (!merged) continue;
+      if (ao) bakeAo(merged, ao);
       merged.computeBoundingSphere();
       const mesh = new THREE.Mesh(merged, mat);
       mesh.castShadow = true;
@@ -270,6 +281,150 @@ export function cart(B: Builder, phys: Physics, x: number, z: number, yaw: numbe
   phys.addCentered(x, z, 0.85, 0.6, 0, LOT_Y + 1.1, KIND.Prop);
 }
 
+/* ── street life ──────────────────────────────────────────────────────────── */
+
+function rawBox(w: number, h: number, d: number): THREE.BufferGeometry {
+  return new THREE.BoxGeometry(w, h, d);
+}
+
+/**
+ * Overhead power lines: concrete-and-timber poles, three sagging conductors, the odd
+ * transformer drum. Nothing says South Asian street faster than a skyline criss-crossed
+ * with cables, and it is only thin boxes merged into the existing batches.
+ */
+export function powerLine(
+  B: Builder, phys: Physics, x0: number, z0: number, x1: number, z1: number,
+  spacing = 28, baseY = WALK_Y,
+): void {
+  const m = M!;
+  const alongX = Math.abs(x1 - x0) > Math.abs(z1 - z0);
+  const span = alongX ? x1 - x0 : z1 - z0;
+  const n = Math.max(1, Math.round(Math.abs(span) / spacing));
+  const step = span / n;
+  const H = 8.4;
+  const at2 = (i: number): [number, number] => (alongX ? [x0 + step * i, z0] : [x0, z0 + step * i]);
+
+  for (let i = 0; i <= n; i++) {
+    const [px, pz] = at2(i);
+    B.cyl(m.wood, px, baseY + H / 2, pz, 0.12, 0.19, H, 7);
+    B.box(m.wood, px, baseY + H - 0.45, pz, alongX ? 0.16 : 2.5, 0.14, alongX ? 2.5 : 0.16, 0, 2);
+    for (const o of [-1, 0, 1]) {
+      B.cyl(m.concrete, alongX ? px : px + o, baseY + H - 0.24, alongX ? pz + o : pz, 0.055, 0.07, 0.28, 6);
+    }
+    if (i % 3 === 1) {
+      B.cyl(m.metal, px + (alongX ? 0.45 : 0), baseY + H - 2.2, pz + (alongX ? 0 : 0.45), 0.32, 0.32, 0.85, 10);
+    }
+    phys.addCentered(px, pz, 0.22, 0.22, 0, baseY + 2.2, KIND.Prop);
+
+    if (i === n) break;
+    const [qx, qz] = at2(i + 1);
+    for (const o of [-1, 0, 1]) {
+      cable(B, alongX ? px : px + o, alongX ? pz + o : pz, alongX ? qx : qx + o, alongX ? qz + o : qz, baseY + H - 0.28, 0.8, alongX);
+    }
+  }
+}
+
+/** One conductor, as four chords of its catenary sag. */
+function cable(B: Builder, x0: number, z0: number, x1: number, z1: number, y: number, sag: number, alongX: boolean): void {
+  const m = M!;
+  const SEG = 4;
+  const dx = (x1 - x0) / SEG, dz = (z1 - z0) / SEG;
+  const flat = Math.hypot(dx, dz);
+  for (let k = 0; k < SEG; k++) {
+    const t0 = k / SEG, t1 = (k + 1) / SEG;
+    const y0 = y - sag * 4 * t0 * (1 - t0);
+    const y1 = y - sag * 4 * t1 * (1 - t1);
+    const len = Math.hypot(flat, y1 - y0);
+    const tilt = Math.atan2(y1 - y0, flat);
+    const cx = x0 + dx * (k + 0.5), cz = z0 + dz * (k + 0.5), cy = (y0 + y1) / 2;
+    // rotation about Z lifts +X; rotation about X lifts +Z the other way round
+    if (alongX) B.push(m.metal, rawBox(len, 0.045, 0.045), cx, cy, cz, 0, 0, tilt);
+    else B.push(m.metal, rawBox(0.045, 0.045, len), cx, cy, cz, 0, -tilt, 0);
+  }
+}
+
+/** A charpai — the woven rope bed that lives outside every second house. */
+export function charpai(B: Builder, phys: Physics, x: number, z: number, rotY: number, baseY = LOT_Y): void {
+  const m = M!;
+  const w = 1.0, l = 1.9, h = 0.42;
+  for (const [ox, oz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as [number, number][]) {
+    const lx = x + (rotY ? oz * l / 2 : ox * w / 2), lz = z + (rotY ? ox * w / 2 : oz * l / 2);
+    B.cyl(m.wood, lx, baseY + h / 2, lz, 0.05, 0.07, h, 6);
+  }
+  // frame
+  B.box(m.wood, x, baseY + h, z, rotY ? l : w, 0.09, rotY ? w : l, 0, 2);
+  // rope weave: a lattice of thin strips
+  for (let i = -3; i <= 3; i++) {
+    B.box(m.dirt, x + (rotY ? 0 : i * w / 7), baseY + h + 0.06, z + (rotY ? i * w / 7 : 0), rotY ? l : 0.05, 0.03, rotY ? 0.05 : l, 0, 2);
+  }
+  for (let i = -6; i <= 6; i++) {
+    B.box(m.dirt, x + (rotY ? i * l / 13 : 0), baseY + h + 0.09, z + (rotY ? 0 : i * l / 13), rotY ? 0.05 : w, 0.03, rotY ? w : 0.05, 0, 2);
+  }
+  phys.addCentered(x, z, rotY ? l / 2 : w / 2, rotY ? w / 2 : l / 2, 0, baseY + h + 0.1, KIND.Prop);
+}
+
+/** Tandoor and naan counter: clay oven, stacked naan, a flour sack. */
+export function tandoor(B: Builder, phys: Physics, x: number, z: number, baseY = LOT_Y): void {
+  const m = M!;
+  B.cyl(m.brick, x, baseY + 0.55, z, 0.52, 0.66, 1.1, 12);
+  B.cyl(m.dirt, x, baseY + 1.12, z, 0.3, 0.42, 0.1, 12);          // mouth
+  B.box(m.wood, x + 1.5, baseY + 0.45, z, 1.9, 0.09, 0.85, 0, 2); // counter
+  for (const ox of [0.7, 2.3]) {
+    B.cyl(m.wood, x + ox, baseY + 0.22, z - 0.3, 0.05, 0.05, 0.44, 5);
+    B.cyl(m.wood, x + ox, baseY + 0.22, z + 0.3, 0.05, 0.05, 0.44, 5);
+  }
+  for (let i = 0; i < 5; i++) B.cyl(m.dirt, x + 1.2, baseY + 0.52 + i * 0.035, z + 0.1, 0.26, 0.26, 0.035, 10);
+  B.box(m.dirt, x + 2.5, baseY + 0.3, z + 0.5, 0.6, 0.6, 0.45, 0, 2);   // flour sack
+  phys.addCentered(x + 0.7, z, 1.8, 0.6, 0, baseY + 1.1, KIND.Prop);
+}
+
+/** Chai stall: kettle on a burner, glasses, a bench and a cloth awning. */
+export function chaiStall(B: Builder, phys: Physics, x: number, z: number, rotY: number, baseY = LOT_Y): void {
+  const m = M!;
+  B.box(m.wood, x, baseY + 0.45, z, 1.7, 0.1, 0.8, rotY, 2);
+  for (const ox of [-0.7, 0.7]) {
+    for (const oz of [-0.3, 0.3]) {
+      B.cyl(m.wood, x + Math.cos(rotY) * ox, baseY + 0.22, z - Math.sin(rotY) * ox + oz, 0.05, 0.05, 0.44, 5);
+    }
+  }
+  // kettle: body, spout, lid
+  B.cyl(m.metal, x - 0.35, baseY + 0.68, z, 0.2, 0.24, 0.36, 12);
+  B.cyl(m.metal, x - 0.15, baseY + 0.78, z, 0.03, 0.05, 0.28, 6, Math.PI / 2.6);
+  B.sphere(m.metal, x - 0.35, baseY + 0.88, z, 0.09, 8, 6);
+  // glasses in a row
+  for (let i = 0; i < 5; i++) B.cyl(m.glass, x + 0.15 + i * 0.14, baseY + 0.56, z + 0.2, 0.045, 0.04, 0.11, 6);
+  // awning on two poles
+  for (const ox of [-0.85, 0.85]) B.cyl(m.metal, x + ox, baseY + 1.15, z - 0.5, 0.035, 0.035, 1.5, 5);
+  B.box(m.roof, x, baseY + 1.95, z - 0.1, 2.4, 0.07, 1.5, rotY, 3);
+  bench(B, phys, x, z - 1.5, rotY, baseY);
+  phys.addCentered(x, z, 0.95, 0.5, 0, baseY + 0.9, KIND.Prop);
+}
+
+/** Rooftop satellite dish — on half the roofs in the country. */
+export function satelliteDish(B: Builder, x: number, y: number, z: number, rotY: number): void {
+  const m = M!;
+  B.box(m.metal, x, y + 0.06, z, 0.34, 0.12, 0.34, 0, 2);
+  B.cyl(m.metal, x, y + 0.34, z, 0.035, 0.045, 0.5, 6);
+  B.push(m.concrete, new THREE.CylinderGeometry(0.42, 0.42, 0.05, 14), x, y + 0.62, z, rotY, -0.9);
+  B.cyl(m.metal, x + Math.sin(rotY) * 0.28, y + 0.78, z + Math.cos(rotY) * 0.28, 0.03, 0.03, 0.22, 5);
+}
+
+/** Washing line with clothes pegged out — the other half of every roof. */
+export function laundryLine(B: Builder, x: number, y: number, z: number, len: number, rotY: number): void {
+  const m = M!;
+  const sx = Math.sin(rotY), cz = Math.cos(rotY);
+  for (const t of [-0.5, 0.5]) {
+    B.cyl(m.metal, x + sx * len * t, y + 0.6, z + cz * len * t, 0.03, 0.04, 1.2, 5);
+  }
+  B.box(m.metal, x, y + 1.16, z, sx ? len : 0.02, 0.02, sx ? 0.02 : len, 0, 2);
+  // hanging cloth, alternating colours
+  const cols = [m.plaster[0], m.plaster[3], m.plaster[2], m.plaster[4]];
+  for (let i = 0; i < 4; i++) {
+    const t = -0.36 + i * 0.24;
+    B.box(cols[i % cols.length], x + sx * len * t, y + 0.86, z + cz * len * t, sx ? 0.42 : 0.05, 0.55, sx ? 0.05 : 0.42, 0, 2);
+  }
+}
+
 /* ── plot number plates ───────────────────────────────────────────────────── */
 
 let plateMat: THREE.MeshBasicMaterial | null = null;
@@ -313,4 +468,26 @@ export function numberPlate(B: Builder, n: number, x: number, y: number, z: numb
   }
   uv.needsUpdate = true;
   B.push(plateMaterial(), g, x, y, z, rotY);
+}
+
+/**
+ * Write per-vertex occlusion into a merged geometry's colour attribute. Uint8 normalised
+ * keeps it to 3 bytes a vertex — about 0.6MB for the whole city.
+ */
+function bakeAo(geo: THREE.BufferGeometry, ao: AoGrid): void {
+  const pos = geo.attributes.position as THREE.BufferAttribute;
+  const nrm = geo.attributes.normal as THREE.BufferAttribute | undefined;
+  const n = pos.count;
+  const col = new Uint8Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const v = ao.sample(
+      pos.getX(i), pos.getY(i), pos.getZ(i),
+      nrm ? nrm.getX(i) : 0, nrm ? nrm.getY(i) : 1, nrm ? nrm.getZ(i) : 0,
+    );
+    const b = (v * 255) | 0;
+    col[i * 3] = b;
+    col[i * 3 + 1] = b;
+    col[i * 3 + 2] = b;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3, true));
 }

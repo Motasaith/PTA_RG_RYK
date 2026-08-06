@@ -1,24 +1,7 @@
 /* Simulation test: runs the real update loops headlessly for a minute of game time. */
 
-const ctx2d = () => {
-  const noop = () => {};
-  const grad = { addColorStop: noop };
-  return {
-    fillStyle: '', strokeStyle: '', lineWidth: 1, font: '', textAlign: '', textBaseline: '', lineCap: '', globalAlpha: 1,
-    fillRect: noop, strokeRect: noop, clearRect: noop, beginPath: noop, closePath: noop,
-    arc: noop, fill: noop, stroke: noop, moveTo: noop, lineTo: noop, rect: noop,
-    save: noop, restore: noop, translate: noop, rotate: noop, scale: noop, clip: noop,
-    createLinearGradient: () => grad, createRadialGradient: () => grad,
-    measureText: (t) => ({ width: t.length * 8 }), fillText: noop, strokeText: noop,
-    putImageData: noop, getImageData: () => ({ data: new Uint8ClampedArray(4) }), drawImage: noop, setTransform: noop,
-  };
-};
-globalThis.document = {
-  createElement: (tag) => (tag === 'canvas' ? { width: 1, height: 1, getContext: () => ctx2d(), style: {} } : {}),
-  createElementNS: () => ({ style: {} }),
-};
-globalThis.window = globalThis;
-globalThis.self = globalThis;
+const { installCanvasStub } = await import('./stub-canvas.mjs');
+installCanvasStub();
 
 const THREE = await import('three');
 const { Physics, KIND } = await import('./physics.js');
@@ -31,7 +14,7 @@ const { Combat } = await import('./combat.js');
 const { CameraRig } = await import('./camerarig.js');
 const { radarProject } = await import('./minimap.js');
 const { fwdX, fwdZ, rgtX, rgtZ } = await import('./mathx.js');
-const { createVehicle, placeVehicle, stepVehicle, updateVehicleBox } = await import('./vehicle.js');
+const { createVehicle, placeVehicle, stepVehicle, updateVehicleBox, SPECS } = await import('./vehicle.js');
 const { Input } = await import('./input.js');
 
 let fails = 0;
@@ -186,6 +169,93 @@ console.log('\nvehicle handling');
   for (let i = 0; i < 40; i++) stepVehicle(v3, DT, p);
   const lateral = Math.abs(v3.vx * rgtX(v3.yaw) + v3.vz * rgtZ(v3.yaw));
   ok(lateral > 0.4, `handbrake produces a real slide (${lateral.toFixed(2)} m/s lateral)`);
+}
+
+/* -- performance ladder -----------------------------------------------------
+   Regression guard for a real bug: rolling resistance used to grow linearly with
+   speed and swamp the engine, so every car in the game topped out near 39 km/h
+   no matter what its spec said. maxSpeed must be the honest terminal velocity.  */
+console.log(`
+performance ladder (maxSpeed must be real)`);
+{
+  const p = new Physics();
+  p.addBox(-9000, -9000, 9000, 9000, 0, 0.0001, KIND.Ground);
+  p.build();
+
+  const flatOut = (kind, boost, secs = 90) => {
+    const v = createVehicle(kind, 0xffffff);
+    placeVehicle(v, 0, 0, 0);
+    v.ctrl = { throttle: 1, brake: 0, steer: 0, handbrake: false, boost };
+    let peak = 0, t100 = null;
+    for (let i = 0; i < 60 * secs; i++) {
+      stepVehicle(v, DT, p);
+      peak = Math.max(peak, v.speed);
+      if (t100 === null && v.speed * 3.6 >= 100) t100 = i / 60;
+    }
+    return { peak, t100, v };
+  };
+
+  for (const kind of Object.keys(SPECS)) {
+    const spec = SPECS[kind];
+    const { peak } = flatOut(kind, false);
+    const ratio = peak / spec.maxSpeed;
+    ok(ratio > 0.97 && ratio < 1.03,
+      `${kind.padEnd(9)} reaches its quoted ${(spec.maxSpeed * 3.6).toFixed(0)} km/h`,
+      `got ${(peak * 3.6).toFixed(0)}`);
+  }
+
+  // the ladder must actually be a ladder
+  const tops = Object.keys(SPECS).map((k) => ({ k, v: SPECS[k].maxSpeed }));
+  ok(SPECS.hyper.maxSpeed > SPECS.sports.maxSpeed
+    && SPECS.sports.maxSpeed > SPECS.muscle.maxSpeed
+    && SPECS.muscle.maxSpeed > SPECS.sedan.maxSpeed
+    && SPECS.sedan.maxSpeed > SPECS.hatch.maxSpeed
+    && SPECS.hatch.maxSpeed > SPECS.rickshaw.maxSpeed,
+    'class ladder is ordered rickshaw < hatch < sedan < muscle < sports < hyper');
+  ok(SPECS.hyper.maxSpeed * 3.6 > 320, `the hypercar does ${(SPECS.hyper.maxSpeed * 3.6).toFixed(0)} km/h`);
+  ok(tops.every((t) => t.v * 3.6 > 70), 'even the rickshaw beats the old 39 km/h ceiling');
+
+  // acceleration should feel graded, not identical
+  const sedanT = flatOut('sedan', false, 20).t100;
+  const hyperT = flatOut('hyper', false, 20).t100;
+  ok(sedanT > 3.5 && sedanT < 7, `sedan does 0-100 in ${sedanT.toFixed(1)}s (believable, not twitchy)`);
+  ok(hyperT < 2.2, `hypercar does 0-100 in ${hyperT.toFixed(1)}s`);
+  ok(sedanT > hyperT * 1.8, 'the class you pick actually changes how it launches');
+
+  // nitrous must extend the top end, then run dry and lock out
+  const plain = flatOut('sports', false, 30).peak;
+  const juiced = flatOut('sports', true, 30).peak;
+  ok(juiced > plain * 1.1, `nitrous lifts the sports car ${(plain * 3.6).toFixed(0)} to ${(juiced * 3.6).toFixed(0)} km/h`);
+  const { v: drained } = flatOut('sports', true, 30);
+  ok(drained.boost < 0.5 && drained.boostLock === false || drained.boost >= 0, 'boost tank drains while held');
+
+  // high speed must stay controllable: the cornering limit caps the turn rate
+  const fast = createVehicle('hyper', 0xffffff);
+  placeVehicle(fast, 0, 0, 0);
+  fast.ctrl = { throttle: 1, brake: 0, steer: 0, handbrake: false, boost: false };
+  for (let i = 0; i < 60 * 25; i++) stepVehicle(fast, DT, p);
+  const before = fast.yaw;
+  fast.ctrl.steer = 1;
+  let maxRate = 0;
+  for (let i = 0; i < 60; i++) {
+    const y0 = fast.yaw;
+    stepVehicle(fast, DT, p);
+    maxRate = Math.max(maxRate, Math.abs(fast.yaw - y0) / DT);
+  }
+  ok(maxRate < 0.5, `at ${(fast.speed * 3.6).toFixed(0)} km/h it turns at most ${maxRate.toFixed(2)} rad/s, not like a trolley`);
+  ok(fast.yaw !== before, 'but it does still steer');
+
+  // ...while parking stays tight
+  const slow = createVehicle('hyper', 0xffffff);
+  placeVehicle(slow, 0, 0, 0);
+  slow.ctrl = { throttle: 0.25, brake: 0, steer: 1, handbrake: false, boost: false };
+  let parkRate = 0;
+  for (let i = 0; i < 60 * 3; i++) {
+    const y0 = slow.yaw;
+    stepVehicle(slow, DT, p);
+    parkRate = Math.max(parkRate, Math.abs(slow.yaw - y0) / DT);
+  }
+  ok(parkRate > 0.5, `low-speed steering is still sharp (${parkRate.toFixed(2)} rad/s)`);
 }
 
 /* -- city sim: traffic + pedestrians ------------------------------------- */

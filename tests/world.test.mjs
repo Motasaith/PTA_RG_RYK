@@ -2,34 +2,13 @@
    then asserts the things the player complained about are actually true. */
 
 /* ---------------- minimal DOM/canvas stub (three only stores canvases as texture images) ---------------- */
-const ctx2d = () => {
-  const noop = () => {};
-  const grad = { addColorStop: noop };
-  return {
-    fillStyle: '', strokeStyle: '', lineWidth: 1, font: '', textAlign: '', textBaseline: '', lineCap: '',
-    globalAlpha: 1,
-    fillRect: noop, strokeRect: noop, clearRect: noop, beginPath: noop, closePath: noop,
-    arc: noop, fill: noop, stroke: noop, moveTo: noop, lineTo: noop, rect: noop,
-    save: noop, restore: noop, translate: noop, rotate: noop, scale: noop, clip: noop,
-    createLinearGradient: () => grad, createRadialGradient: () => grad,
-    measureText: (t) => ({ width: t.length * 8 }), fillText: noop, strokeText: noop,
-    putImageData: noop, getImageData: () => ({ data: new Uint8ClampedArray(4) }),
-    drawImage: noop, setTransform: noop,
-  };
-};
-globalThis.document = {
-  createElement: (tag) => {
-    if (tag !== 'canvas') return {};
-    return { width: 1, height: 1, getContext: () => ctx2d(), style: {}, toDataURL: () => '' };
-  },
-  createElementNS: () => ({ style: {} }),
-};
-globalThis.self = globalThis;
+const { installCanvasStub } = await import('./stub-canvas.mjs');
+installCanvasStub();
 globalThis.window = globalThis;
 
 const THREE = await import('three');
 const { Physics, KIND } = await import('./physics.js');
-const { buildMaterials } = await import('./materials.js');
+const { buildMaterials, rippleNormal } = await import('./materials.js');
 const city = await import('./city.js');
 const scheme = await import('./scheme.js');
 const { QUALITY } = await import('./settings.js');
@@ -221,6 +200,109 @@ rahim garden housing scheme`);
   }
   ok(entryWidths.length === 4 && entryWidths.every((w) => w < 16),
     `entry lanes sized to the scheme streets (${entryWidths.map((w) => w.toFixed(1)).join(', ')}m)`);
+}
+
+/* -- look and feel ------------------------------------------------------------
+   The visual pass has to stay free: baked into vertex colours and textures, with
+   no extra render passes. These assert it is actually there and actually varies.  */
+console.log(`
+look and feel (must cost nothing at runtime)`);
+{
+  // 1. baked ambient occlusion, written into the merged geometry's vertex colours
+  let withColour = 0, lo = 1, hi = 0, samples = 0;
+  C.root.traverse((o) => {
+    const g = o.geometry;
+    if (!g || !g.attributes || !g.attributes.color) return;
+    withColour++;
+    const col = g.attributes.color;
+    const step = Math.max(1, Math.floor(col.count / 4000));
+    for (let i = 0; i < col.count; i += step) {
+      const v = col.getX(i);
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+      samples++;
+    }
+  });
+  ok(withColour >= 8, `${withColour} merged meshes carry baked AO in vertex colours`);
+  ok(hi > 0.93, `open surfaces stay bright (max ${hi.toFixed(2)})`);
+  ok(lo < 0.72, `enclosed corners and undersides go dark (min ${lo.toFixed(2)})`);
+  ok(samples > 3000, `${samples} vertices sampled`);
+
+  // 2. normal maps derived from the albedo, and not degenerate
+  const flatish = (t) => {
+    const d = t.image.getContext('2d').getImageData(0, 0, t.image.width, t.image.height).data;
+    let maxDev = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      maxDev = Math.max(maxDev, Math.abs(d[i] - 128), Math.abs(d[i + 1] - 128));
+    }
+    return maxDev;
+  };
+  ok(!!mats.brick.normalMap, 'brick has a derived normal map');
+  ok(!!mats.concrete.normalMap && !!mats.asphalt.normalMap, 'concrete and asphalt too');
+  ok(flatish(mats.brick.normalMap) > 12, `the brick normal map has real relief (deviation ${flatish(mats.brick.normalMap)})`);
+  ok(mats.brick.vertexColors === true, 'static materials read the baked AO');
+
+  // 3. water: one pass, two texture samples, no reflection render
+  ok(mats.water.type === 'ShaderMaterial', 'water is a single-pass custom shader');
+  ok(!!mats.water.uniforms.uRipple.value, 'water has its procedural ripple normal map');
+  ok(mats.water.fragmentShader.includes('cameraPosition'), 'water computes a real Fresnel term');
+  ok(!mats.water.fragmentShader.includes('reflectionTexture'), 'water does NOT render the scene twice');
+  const rip = rippleNormal();
+  ok(flatish(rip) > 20, `the ripple map has slope (deviation ${flatish(rip)})`);
+
+  // 4. wind: a vertex-shader hook on the already-merged foliage mesh
+  ok(typeof mats.foliage.onBeforeCompile === 'function', 'foliage has a wind hook');
+  const fake = { uniforms: {}, vertexShader: '#include <begin_vertex>' };
+  mats.foliage.onBeforeCompile(fake);
+  ok(!!fake.uniforms.uTime, 'the wind hook installs a time uniform');
+  ok(fake.vertexShader.includes('swayAmt'), 'the wind hook injects sway into the vertex shader');
+  ok(fake.vertexShader.includes('smoothstep(1.1, 4.2'), 'sway ramps in with height so trunks stay still');
+}
+
+/* -- Pakistani character -------------------------------------------------- */
+console.log(`
+pakistani character`);
+{
+  const { createVehicle, SPECS } = await import('./vehicle.js');
+  const { tex } = await import('./materials.js');
+
+  // the jingle truck
+  const truck = createVehicle('truck', 0x1f7ae0);
+  ok(SPECS.truck.name === 'BEDFORD TRUCK', 'the Bedford is a vehicle class');
+  const wheels = truck.wheelMeshes.length;
+  ok(wheels === 6, `the truck runs six wheels, two of them steering (${wheels})`);
+  ok(truck.wheelMeshes.filter((w) => w.front).length === 2, 'front axle steers, rear four do not');
+  ok(SPECS.truck.halfL * 2 > 8, `it is ${(SPECS.truck.halfL * 2).toFixed(1)}m long`);
+  ok(SPECS.truck.maxSpeed * 3.6 < 100, `and slow with it (${(SPECS.truck.maxSpeed * 3.6).toFixed(0)} km/h)`);
+  // painted panels use a texture, not a flat colour
+  const painted = [];
+  truck.group.traverse((o) => { if (o.material && o.material.map) painted.push(o); });
+  ok(painted.length >= 5, `${painted.length} painted panels carry truck art`);
+
+  // truck art must actually be colourful, not a grey box
+  const art = tex.truckArt();
+  const d = art.image.getContext('2d').getImageData(0, 0, art.image.width, art.image.height).data;
+  const hues = new Set();
+  let saturated = 0;
+  for (let k = 0; k < d.length; k += 4 * 97) {
+    const r = d[k], g = d[k + 1], b = d[k + 2];
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    if (mx - mn > 60) { saturated++; hues.add(Math.round(Math.atan2(g - b, r - g) * 4)); }
+  }
+  ok(saturated > 40, `truck art is genuinely colourful (${saturated} saturated samples)`);
+  ok(hues.size >= 4, `and uses ${hues.size} different hue families`);
+
+  // overhead cables and street furniture, and none of it in the carriageway
+  const props = phys.boxes.filter((b) => b.kind === KIND.Prop);
+  ok(props.length > 700, `${props.length} props including poles, charpais and stalls`);
+  const propsOnRoad = props.filter((b) => onRoad((b.minX + b.maxX) / 2, (b.minZ + b.maxZ) / 2, 0.3));
+  ok(propsOnRoad.length === 0, 'no pole, charpai or tandoor stands in the road', `${propsOnRoad.length} offenders`);
+
+  // shop names should read like a Pakistani bazaar
+  const names = C.shops.map((sh) => sh.name).join(' ');
+  const local = ['KIRYANA', 'TANDOOR', 'CHAI', 'BIRYANI', 'EASYLOAD', 'PUNCTURE', 'SABZI', 'SWEETS'];
+  const found = local.filter((w) => names.includes(w));
+  ok(found.length >= 4, `bazaar signage is local: ${found.join(', ')}`);
 }
 
 console.log(`\n${fails === 0 ? 'ALL PASS' : fails + ' FAILURES'}\n`);

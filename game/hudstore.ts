@@ -14,7 +14,11 @@ export interface HudState {
   reloading: boolean;
   inVehicle: boolean;
   vehicleName: string;
+  vehicleClass: string;
   speed: number;
+  /** 0..1 nitrous remaining */
+  boost: number;
+  boosting: boolean;
   prompt: string;
   toast: string;
   objective: string;
@@ -36,7 +40,7 @@ const initial: HudState = {
   phase: 'loading', loadPct: 0, loadMsg: 'starting up…',
   health: 100, armour: 0, money: 500, wanted: 0,
   weapon: 'fists', mag: 0, reserve: 0, reloading: false,
-  inVehicle: false, vehicleName: '', speed: 0,
+  inVehicle: false, vehicleName: '', vehicleClass: '', speed: 0, boost: 1, boosting: false,
   prompt: '', toast: '', objective: '', found: 0, total: 8,
   clock: '00:00', hour: 11, fps: 0, triangles: 0, drawCalls: 0,
   aiming: false, hitMarker: 0, crosshairHot: false, busted: false, mapOpen: false,

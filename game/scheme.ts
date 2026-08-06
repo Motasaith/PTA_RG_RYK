@@ -4,8 +4,8 @@ import { Mats, signTexture } from './materials';
 import { KIND, Physics } from './physics';
 import { QualityPreset } from './settings';
 import {
-  bench, Builder, Collect, connect, FT, lamp, LOT_Y, numberPlate, PAINT_Y, RoadNode,
-  ROAD_Y, tree, WALK_Y,
+  bench, Builder, chaiStall, charpai, Collect, connect, FT, lamp, laundryLine, LOT_Y,
+  numberPlate, PAINT_Y, powerLine, RoadNode, ROAD_Y, satelliteDish, tandoor, tree, WALK_Y,
 } from './layout';
 
 /**
@@ -160,6 +160,12 @@ export function buildScheme(
       SCHEME_WEST, Math.min(band.z0, band.z0 + PLOT_D),
       SCHEME_EAST, Math.max(band.z0, band.z0 + PLOT_D), 0, LOT_Y, KIND.Ground,
     );
+    // Overhead power lines down the kerb, one run per block face so no pole lands in a
+    // junction. This is the detail that makes a street read as Pakistani more than any
+    // single building does.
+    for (const seg of segments) {
+      powerLine(B, phys, seg.x0 + 2, kerbZ, seg.x1 - 2, kerbZ, 27, LOT_Y);
+    }
     // pedestrians walk the kerb, never the tarmac
     C.pedLoops.push([
       { x: SCHEME_WEST + 8, z: kerbZ },
@@ -265,6 +271,11 @@ export function buildScheme(
       if (i % 2 === 0) C.parkSpots.push({ x: bx, z: cz, yaw: 0 });
     }
     C.pickupSpots.push({ x: cx - 8, z: cz + 7 });
+    // the corner where the neighbourhood actually gathers
+    tandoor(B, phys, cx - 6, cz - 6);
+    chaiStall(B, phys, cx + 2, cz + 6, 0);
+    charpai(B, phys, cx - 2, cz - 7, 0);
+    charpai(B, phys, cx + 8, cz - 7, 1);
   }
 
   /* ── entrance gate on the boulevard ───────────────────────────────────── */
@@ -397,6 +408,11 @@ function plot(
   // rooftop water tank + stair enclosure
   B.box(mats.plaster[1], cx + hw / 2 - 1.8, LOT_Y + h + 1.4, hz + into * (hd / 2 - 1.8), 3, 2.2, 3, 0, 4);
   B.cyl(mats.metal, cx - hw / 2 + 1.6, LOT_Y + h + 1.2, hz, 0.62, 0.62, 1.25, 10);
+  // rooftop life: a dish and the washing out to dry
+  if (no % 2 === 0) satelliteDish(B, cx - hw / 2 + 0.9, LOT_Y + h + 0.55, hz - into * (hd / 2 - 1.2), (no % 4) * 0.7);
+  if (no % 3 === 0) laundryLine(B, cx + 1.2, LOT_Y + h + 0.55, hz, Math.min(hd - 2, 5), Math.PI / 2);
+  // a charpai out in the courtyard
+  if (no % 5 === 1) charpai(B, phys, cx + halfW * 0.45, o.front + into * 4.6, no % 2);
 
   // driveway from the gate to the house
   const dz = (o.front + hz) / 2;

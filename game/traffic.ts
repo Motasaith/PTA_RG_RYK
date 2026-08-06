@@ -15,7 +15,12 @@ interface Lane {
   stuck: number;
 }
 
-const CIVILIAN: VehKind[] = ['sedan', 'hatch', 'suv', 'van', 'sports', 'rickshaw', 'sedan', 'hatch'];
+// Weighted by how common each is on the street: mostly ordinary cars, the odd fast one,
+// and a hypercar you will occasionally find parked and be very pleased about.
+const CIVILIAN: VehKind[] = [
+  'sedan', 'hatch', 'suv', 'van', 'rickshaw', 'sedan', 'hatch', 'suv',
+  'sedan', 'hatch', 'rickshaw', 'van', 'muscle', 'sports', 'truck', 'hyper',
+];
 
 /**
  * Traffic drives the *same* physics as the player: an AI controller writes throttle/brake/
@@ -154,6 +159,7 @@ export class Traffic {
         v.ctrl.brake = 1;
         v.ctrl.steer = 0;
         v.ctrl.handbrake = true;
+        v.ctrl.boost = false;
       }
       stepVehicle(v, dt, this.phys);
     }
@@ -170,6 +176,8 @@ export class Traffic {
     v.ctrl.throttle = over ? 0 : 1;
     v.ctrl.brake = over ? clamp((v.speed - want) * 0.25, 0, 1) : 0;
     v.ctrl.handbrake = Math.abs(err) > 1.9 && v.speed > 9;
+    // burn nitrous to close a gap on a straight — otherwise a hypercar is simply uncatchable
+    v.ctrl.boost = d > 45 && Math.abs(err) < 0.5;
     void dt;
   }
 
@@ -186,6 +194,7 @@ export class Traffic {
     const dx = target.x - v.x, dz = target.z - v.z;
     const err = wrapPi(Math.atan2(dx, dz) - v.yaw);
     v.ctrl.steer = clamp(-err * 1.7, -1, 1);
+    v.ctrl.boost = false;      // ordinary traffic pootles along; only pursuit uses nitrous
 
     // progress: project our movement onto the edge direction
     const edx = (lane.to.x - lane.from.x) / (len || 1), edz = (lane.to.z - lane.from.z) / (len || 1);

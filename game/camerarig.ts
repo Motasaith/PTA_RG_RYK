@@ -119,7 +119,10 @@ export class CameraRig {
       this.yaw = angleDamp(this.yaw, behind, 3.2, dt);
       this.pitch = damp(this.pitch, 0.22, 3, dt);
     }
-    const back = v.spec.camBack + Math.min(2.4, Math.abs(v.speed) * 0.075);
+    // Speed sense scaled to the car's OWN top speed, so a flat-out rickshaw feels quick
+    // and a hypercar at 60 km/h feels like it is loafing.
+    const rel = clamp(Math.abs(v.speed) / v.spec.maxSpeed, 0, 1.3);
+    const back = v.spec.camBack + rel * 2.4 + (v.boosting ? 0.9 : 0);
     const cp = Math.cos(this.pitch), sp = Math.sin(this.pitch);
     this.pivot.set(v.x, v.y + v.spec.camUp * 0.42 + 0.8, v.z);
     this.desired.set(
@@ -135,8 +138,10 @@ export class CameraRig {
     this.applyShake(camera, dt, s);
     camera.lookAt(v.x + Math.sin(v.yaw) * 4, v.y + 1.1, v.z + Math.cos(v.yaw) * 4);
 
-    const targetFov = s.fov + Math.min(12, Math.abs(v.speed) * 0.42);
-    this.fov = damp(this.fov, targetFov, 6, dt);
+    const targetFov = s.fov + rel * 13 + (v.boosting ? 7 : 0);
+    this.fov = damp(this.fov, targetFov, v.boosting ? 9 : 6, dt);
+    // a whisper of shake once you are near the limit — free, and it sells the speed
+    if (rel > 0.82 && s.cameraShake) this.shake = Math.max(this.shake, (rel - 0.82) * 0.5);
     camera.fov = this.fov;
     camera.updateProjectionMatrix();
   }

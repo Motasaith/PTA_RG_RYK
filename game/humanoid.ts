@@ -221,6 +221,10 @@ export interface PoseInput {
   flinch: number;
   /** steering input while driving, −1..1 */
   steer: number;
+  /** Where the camera is looking, relative to the body. This is what makes the character
+   *  feel connected to the camera instead of staring blankly ahead while you look around. */
+  lookYaw?: number;
+  lookPitch?: number;
 }
 
 /** Drives every joint. Called once per frame per visible character. */
@@ -275,15 +279,21 @@ export function poseHumanoid(h: Humanoid, p: PoseInput): void {
   h.tilt.rotation.x = damp(h.tilt.rotation.x, 0.03 + sr * 0.13 * (1 - aw * 0.6), 10, dt);
   h.tilt.rotation.z = damp(h.tilt.rotation.z, 0, 10, dt);
 
-  const chestTwist = lerp(Math.sin(ph) * 0.1 * amp, 0.34, aw);
+  // Look target, split between neck and spine the way a real neck does it — turning the
+  // head alone past about 70° looks like an owl.
+  const lookY = clamp(p.lookYaw ?? 0, -1.9, 1.9);
+  const lookX = clamp(p.lookPitch ?? 0, -0.55, 0.7);
+  const chestTwist = lerp(Math.sin(ph) * 0.1 * amp + lookY * 0.26, 0.34, aw);
   h.chest.rotation.y = chestTwist;
   h.chest.rotation.x = lerp(0.02, -0.06, aw);
   h.chest.rotation.z = 0;
 
-  // ── head: looks where you aim, otherwise steadies against the walk bob
-  h.head.rotation.x = damp(h.head.rotation.x, lerp(-0.02, -clamp(p.aimPitch, -0.7, 0.7) * 0.45, aw), 12, dt);
-  h.head.rotation.y = damp(h.head.rotation.y, lerp(-Math.sin(ph * 0.5) * 0.05 * amp, -0.16, aw), 12, dt);
-  h.head.rotation.z = -h.hips.rotation.z * 0.5;
+  // ── head: follows the camera when free, follows the sights when aiming
+  const headX = lerp(-0.02 + lookX * 0.55, -clamp(p.aimPitch, -0.7, 0.7) * 0.45, aw);
+  const headY = lerp(lookY * 0.62 - Math.sin(ph * 0.5) * 0.05 * amp, -0.16, aw);
+  h.head.rotation.x = damp(h.head.rotation.x, headX, 10, dt);
+  h.head.rotation.y = damp(h.head.rotation.y, clamp(headY, -1.2, 1.2), 10, dt);
+  h.head.rotation.z = -h.hips.rotation.z * 0.5 + lookY * 0.06;
 
   // ── arms
   h.punchT = Math.max(0, h.punchT - dt * 3.4);

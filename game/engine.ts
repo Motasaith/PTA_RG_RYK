@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { angleDamp, clamp, damp, dist2, fwdX, fwdZ, mulberry32, pick, rgtX, rgtZ, Rng, wrapPi } from './mathx';
 import { KIND, Physics } from './physics';
-import { buildMaterials, glowTexture, initTextures, Mats } from './materials';
+import { buildMaterials, glowTexture, initTextures, Mats, updateFoliage } from './materials';
+import { updateWater } from './water';
 import { Sky } from './sky';
 import { buildCity, City, LOT_Y, Shop } from './city';
 import {
@@ -496,6 +497,18 @@ export class Game {
     this.updateItems(dt, t);
     this.updateInteraction();
 
+    // Living world: wind through the leaves and light on the water. Two uniform writes —
+    // no extra render passes, which is why they cost nothing measurable.
+    updateFoliage(this.mats.foliage, t);
+    updateWater(this.mats.water, {
+      time: t,
+      night: this.sky.night,
+      sunDir: this.sky.sunDir(),
+      sunColour: this.sky.sun.color,
+      skyTop: this.sky.topColour(),
+      skyHorizon: this.sky.horizonColour(),
+    });
+
     this.sky.update(dt, this.camera.position.x, this.camera.position.z, this.tmp.set(this.px, this.py, this.pz));
     this.pushHud(dt);
   }
@@ -555,12 +568,17 @@ export class Game {
       }
     }
 
-    // facing: strafe while aiming, otherwise turn towards travel
+    // Facing: strafe while aiming, otherwise turn towards travel.
     const firing = this.input.buttons[0];
+    const lookOff = wrapPi(this.rig.yaw - this.pyaw);
     if (this.aiming || (firing && this.weapon !== 'fists')) {
       this.pyaw = angleDamp(this.pyaw, this.rig.yaw, 18, dt);
     } else if (this.speed > 0.25) {
       this.pyaw = angleDamp(this.pyaw, Math.atan2(this.vx, this.vz), 12, dt);
+    } else if (Math.abs(lookOff) > 1.85) {
+      // Standing still with the camera swung round behind us: shuffle round to face it,
+      // rather than standing with our back to the player for ever.
+      this.pyaw = angleDamp(this.pyaw, this.rig.yaw, 2.6, dt);
     }
 
     // footsteps
@@ -581,6 +599,9 @@ export class Game {
       aiming: this.aiming || (firing && this.weapon !== 'fists'),
       aimPitch: -this.rig.pitch, dead: 0, seated: false,
       punch: this.punchT > 0.22 ? 1 : 0, flinch: this.flinch, steer: 0,
+      // the head tracks the camera, so looking around actually looks around
+      lookYaw: wrapPi(this.rig.yaw - this.pyaw),
+      lookPitch: this.rig.pitch - 0.24,
     });
     setHumanoidDetail(this.hero, true, this.preset.shadows);
 
@@ -599,6 +620,9 @@ export class Game {
     c.brake = this.input.isDown('back') ? 1 : 0;
     c.steer = this.input.axis('left', 'right');
     c.handbrake = this.input.isDown('jump');
+    const wasBoosting = v.boosting;
+    c.boost = this.input.isDown('sprint');
+    if (v.boosting && !wasBoosting) this.audio.boost();
     if (this.input.justPressed('horn')) {
       v.hornT = 0.3;
       this.audio.horn();
@@ -609,7 +633,7 @@ export class Game {
     this.px = v.x;
     this.pz = v.z;
     this.py = v.y;
-    this.audio.engineRpm(v.speed, v.spec.maxSpeed, c.throttle);
+    this.audio.engineRpm(v.speed, v.spec.maxSpeed, c.throttle + (v.boosting ? 0.4 : 0));
 
     if (v.crashT > 0.3) {
       this.audio.crash(Math.abs(v.speed) + 6);
@@ -645,7 +669,7 @@ export class Game {
     this.hero.root.rotation.set(0, 0, 0);
     this.audio.engineOn();
     this.audio.ui();
-    setHud({ inVehicle: true, vehicleName: v.spec.name });
+    setHud({ inVehicle: true, vehicleName: v.spec.name, vehicleClass: v.spec.cls.toUpperCase() });
   }
 
   private exitVehicle(): void {
@@ -693,7 +717,7 @@ export class Game {
       this.damagePlayer(Math.min(32, (Math.abs(v.speed) - 9) * 2.2), v.x, v.z, false);
       this.toast('You bailed out!');
     }
-    setHud({ inVehicle: false, vehicleName: '', speed: 0 });
+    setHud({ inVehicle: false, vehicleName: '', vehicleClass: '', speed: 0, boosting: false });
   }
 
   /* ── weapons ───────────────────────────────────────────────────────────── */
@@ -1336,6 +1360,8 @@ export class Game {
       reserve: this.reserve[this.weapon],
       speed: this.vehicle ? vehicleSpeedKmh(this.vehicle) : 0,
       inVehicle: !!this.vehicle,
+      boost: this.vehicle ? this.vehicle.boost : 1,
+      boosting: !!this.vehicle?.boosting,
       aiming: this.aiming,
       hitMarker: this.hitMarker,
       clock: `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`,
