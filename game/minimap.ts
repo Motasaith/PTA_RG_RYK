@@ -77,9 +77,12 @@ export class MapRenderer {
     px: number, pz: number, yaw: number,
     ents: MapEnt[], waypoint: { x: number; z: number } | null,
   ): void {
-    const span = 470;
+    // Fit the whole world (city + housing scheme), north up, letterboxed to the canvas.
+    const b = this.city.bounds;
+    const span = Math.max(b.maxX - b.minX, b.maxZ - b.minZ) * 1.04;
     const scale = Math.min(w, h) / span;
-    const P = (x: number, z: number): [number, number] => [w / 2 + x * scale, h / 2 + z * scale];
+    const cx = (b.minX + b.maxX) / 2, cz = (b.minZ + b.maxZ) / 2;
+    const P = (x: number, z: number): [number, number] => [w / 2 + (x - cx) * scale, h / 2 + (z - cz) * scale];
     ctx.clearRect(0, 0, w, h);
     this.paint(ctx, P, w, h, scale, false);
 

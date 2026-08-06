@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { City, LANE_OFF, LEFT_HAND_TRAFFIC, RoadNode } from './city';
+import { City, laneOffsetFor, LEFT_HAND_TRAFFIC, RoadNode } from './layout';
 import { clamp, dist2, mulberry32, pick, Rng, wrapPi } from './mathx';
 import { Physics } from './physics';
 import {
@@ -39,8 +39,9 @@ export class Traffic {
     const len = Math.hypot(dx, dz) || 1;
     const ux = dx / len, uz = dz / len;
     // right of travel = forward × up = (−uz, ux). Pakistan drives on the left, so we sit
-    // on the opposite side of the centre line.
-    const off = LEFT_HAND_TRAFFIC ? -LANE_OFF : LANE_OFF;
+    // on the opposite side of the centre line. The offset scales with the carriageway so
+    // cars keep left on a 30ft scheme street as well as on a city arterial.
+    const off = (LEFT_HAND_TRAFFIC ? -1 : 1) * laneOffsetFor(from, to);
     const t = clamp(s, 0, len);
     return out.set(from.x + ux * t + -uz * off, 0, from.z + uz * t + ux * off);
   }
@@ -49,11 +50,24 @@ export class Traffic {
     return Math.hypot(l.to.x - l.from.x, l.to.z - l.from.z);
   }
 
+  /**
+   * Pick the next edge out of a junction, preferring to carry straight on. This is
+   * geometric rather than grid-index based, so it works for the housing scheme's
+   * irregular streets as well as the city grid.
+   */
   private chooseNext(from: RoadNode, to: RoadNode): RoadNode {
-    const straight = this.city.node(to.i + (to.i - from.i), to.j + (to.j - from.j));
     const options = to.nb.filter((n) => n !== from);
     if (!options.length) return from;
-    if (straight && options.includes(straight) && this.rng() < 0.62) return straight;
+    const ix = to.x - from.x, iz = to.z - from.z;
+    const il = Math.hypot(ix, iz) || 1;
+    let straight: RoadNode | null = null, best = 0.7;   // ≈45° cone
+    for (const n of options) {
+      const ox = n.x - to.x, oz = n.z - to.z;
+      const ol = Math.hypot(ox, oz) || 1;
+      const dot = (ix * ox + iz * oz) / (il * ol);
+      if (dot > best) { best = dot; straight = n; }
+    }
+    if (straight && this.rng() < 0.62) return straight;
     return pick(this.rng, options);
   }
 

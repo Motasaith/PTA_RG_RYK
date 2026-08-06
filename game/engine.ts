@@ -3,7 +3,7 @@ import { angleDamp, clamp, damp, dist2, fwdX, fwdZ, mulberry32, pick, rgtX, rgtZ
 import { KIND, Physics } from './physics';
 import { buildMaterials, glowTexture, initTextures, Mats } from './materials';
 import { Sky } from './sky';
-import { buildCity, City, LOT_Y, Shop, WORLD_MAX } from './city';
+import { buildCity, City, LOT_Y, Shop } from './city';
 import {
   createHumanoid, disposeHumanoid, Humanoid, poseHumanoid, setHumanoidDetail, SKINS,
 } from './humanoid';
@@ -525,8 +525,9 @@ export class Game {
       const nx = this.px + (this.vx * dt) / steps;
       const nz = this.pz + (this.vz * dt) / steps;
       this.phys.resolveCircle(nx, nz, PLAYER_R, this.py, this.py + PLAYER_H, STEP_UP, true);
-      this.px = clamp(this.phys.outX, -WORLD_MAX, WORLD_MAX);
-      this.pz = clamp(this.phys.outZ, -WORLD_MAX, WORLD_MAX);
+      const B = this.city.bounds;
+      this.px = clamp(this.phys.outX, B.minX, B.maxX);
+      this.pz = clamp(this.phys.outZ, B.minZ, B.maxZ);
     }
 
     // vertical
@@ -625,7 +626,10 @@ export class Game {
 
     this.rig.updateInVehicle(this.camera, dt, v, this.phys, this.settings);
 
-    if (this.input.justPressed('use')) this.exitVehicle();
+    if (this.input.justPressed('use')) {
+      this.input.consume('use');       // don't let updateInteraction re-enter the same car
+      this.exitVehicle();
+    }
   }
 
   private enterVehicle(v: Vehicle): void {
@@ -646,16 +650,16 @@ export class Game {
 
   private exitVehicle(): void {
     const v = this.vehicle!;
-    if (Math.abs(v.speed) > 9) {
-      this.toast('Too fast to jump out!');
-      return;
-    }
+    // Bailing out at speed is allowed — it just hurts. Blocking it instead made E look
+    // broken whenever you were moving.
+    const bail = Math.abs(v.speed) > 9;
     // look for a clear patch beside the car: left, right, then behind
     const rx = rgtX(v.yaw), rz = rgtZ(v.yaw);
     const fx = fwdX(v.yaw), fz = fwdZ(v.yaw);
     const cands: [number, number][] = [
-      [v.x - rx * (v.spec.halfW + 0.9), v.z - rz * (v.spec.halfW + 0.9)],
+      // driver's side first — right-hand drive, so that is the car's right
       [v.x + rx * (v.spec.halfW + 0.9), v.z + rz * (v.spec.halfW + 0.9)],
+      [v.x - rx * (v.spec.halfW + 0.9), v.z - rz * (v.spec.halfW + 0.9)],
       [v.x - fx * (v.spec.halfL + 1.1), v.z - fz * (v.spec.halfL + 1.1)],
       [v.x + fx * (v.spec.halfL + 1.1), v.z + fz * (v.spec.halfL + 1.1)],
     ];
@@ -674,10 +678,21 @@ export class Game {
     this.grounded = true;
     v.isPlayer = false;
     v.ctrl.throttle = 0;
-    v.ctrl.brake = 1;
-    v.ctrl.handbrake = true;
+    v.ctrl.brake = bail ? 0 : 1;
+    v.ctrl.handbrake = !bail;          // a car you dive out of keeps rolling
     this.vehicle = null;
     this.audio.engineOff();
+    if (bail) {
+      // carry the momentum, take the tarmac, and let the camera feel it
+      const carry = Math.min(Math.abs(v.speed) * 0.5, 9) * Math.sign(v.speed);
+      this.vx = fwdX(v.yaw) * carry;
+      this.vz = fwdZ(v.yaw) * carry;
+      this.flinch = 0.45;
+      this.rig.shake = Math.min(1.4, this.rig.shake + 0.7);
+      this.audio.land();
+      this.damagePlayer(Math.min(32, (Math.abs(v.speed) - 9) * 2.2), v.x, v.z, false);
+      this.toast('You bailed out!');
+    }
     setHud({ inVehicle: false, vehicleName: '', speed: 0 });
   }
 
@@ -1190,6 +1205,7 @@ export class Game {
     }
 
     if (this.promptAction && this.input.justPressed('use')) {
+      this.input.consume('use');
       this.promptAction();
       this.promptAction = null;
     }

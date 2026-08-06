@@ -24,7 +24,7 @@ const THREE = await import('three');
 const { Physics, KIND } = await import('./physics.js');
 const { buildMaterials } = await import('./materials.js');
 const city = await import('./city.js');
-const { QUALITY, DEFAULT_SETTINGS } = await import('./settings.js');
+const { QUALITY, DEFAULT_SETTINGS, DEFAULT_BINDS } = await import('./settings.js');
 const { PedManager } = await import('./peds.js');
 const { Traffic } = await import('./traffic.js');
 const { Combat } = await import('./combat.js');
@@ -32,6 +32,7 @@ const { CameraRig } = await import('./camerarig.js');
 const { radarProject } = await import('./minimap.js');
 const { fwdX, fwdZ, rgtX, rgtZ } = await import('./mathx.js');
 const { createVehicle, placeVehicle, stepVehicle, updateVehicleBox } = await import('./vehicle.js');
+const { Input } = await import('./input.js');
 
 let fails = 0;
 const ok = (c, m, x = '') => { if (c) console.log(`  ok   ${m}`); else { console.log(`  FAIL ${m} ${x}`); fails++; } };
@@ -80,6 +81,58 @@ console.log('\nhandedness (D must strafe right)');
   const [axp, ayp] = radarProject(40 + fwdX(yaw) * 20, 40 + fwdZ(yaw) * 20, 40, 40, yaw, 1.5, 100);
   ok(rxp > 110 && Math.abs(ryp - 100) < 1, 'radar puts things on your right on the right');
   ok(ayp < 90 && Math.abs(axp - 100) < 1, 'radar puts things ahead of you at the top');
+}
+
+/* -- input edges ------------------------------------------------------------
+   One key press must trigger exactly one action. The frame runs the driving
+   handler and then the world-interaction handler, and both read the same edge,
+   so without consuming it E would exit a car and immediately re-enter it.     */
+console.log(`
+input edges (one press = one action)`);
+{
+  const handlers = {};
+  globalThis.addEventListener = (type, fn) => { handlers[type] = fn; };
+  globalThis.removeEventListener = () => {};
+  globalThis.document.addEventListener = () => {};
+  globalThis.document.removeEventListener = () => {};
+
+  const el = { addEventListener: () => {}, removeEventListener: () => {} };
+  const input = new Input(el, DEFAULT_BINDS);
+  input.attach();
+  const tap = (code) => handlers.keydown({ code, repeat: false, preventDefault() {} });
+  const release = (code) => handlers.keyup({ code });
+
+  tap('KeyE');
+  ok(input.justPressed('use'), 'E registers as a press');
+
+  // the frame's first handler acts on it and consumes it
+  input.consume('use');
+  ok(!input.justPressed('use'), 'a consumed press is not seen by the next handler in the frame');
+
+  // simulate the real bug: exit then interaction, in one frame
+  release('KeyE');
+  input.endFrame();
+  tap('KeyE');
+  let entered = 0, exited = 0;
+  const frame = () => {
+    if (input.justPressed('use')) { input.consume('use'); exited++; }      // updateDriving
+    if (input.justPressed('use')) { input.consume('use'); entered++; }     // updateInteraction
+    input.endFrame();
+  };
+  frame();
+  ok(exited === 1 && entered === 0, 'one tap of E gets you out of the car and leaves you out', `exit=${exited} enter=${entered}`);
+
+  // holding the key must not repeat
+  frame();
+  frame();
+  ok(exited === 1, 'holding E does not toggle in and out repeatedly');
+
+  // a fresh tap works again
+  release('KeyE');
+  tap('KeyE');
+  frame();
+  ok(exited === 2, 'pressing E again is picked up as a new action');
+  input.detach();
 }
 
 /* -- vehicle handling ----------------------------------------------------- */
@@ -148,6 +201,12 @@ for (let i = 0; i < city.N; i++) {
   const x = city.roadCoord(i);
   strips.push({ minX: x - HR, maxX: x + HR, minZ: city.roadCoord(0) - HR, maxZ: city.roadCoord(city.N - 1) + HR });
   strips.push({ minZ: x - HR, maxZ: x + HR, minX: city.roadCoord(0) - HR, maxX: city.roadCoord(city.N - 1) + HR });
+}
+// the housing scheme streets, taken from the same data the generator used
+for (const r of C.minimap.roads) {
+  const hw = r.w / 2;
+  if (r.z1 === r.z2 && r.z1 > 200) strips.push({ minX: Math.min(r.x1, r.x2), maxX: Math.max(r.x1, r.x2), minZ: r.z1 - hw, maxZ: r.z1 + hw });
+  if (r.x1 === r.x2 && Math.max(r.z1, r.z2) > 200) strips.push({ minZ: Math.min(r.z1, r.z2), maxZ: Math.max(r.z1, r.z2), minX: r.x1 - hw, maxX: r.x1 + hw });
 }
 const onRoad = (x, z) => strips.some((s) => x > s.minX && x < s.maxX && z > s.minZ && z < s.maxZ);
 const solids = phys.boxes.filter((b) => b.kind === KIND.Building);

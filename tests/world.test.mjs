@@ -31,6 +31,7 @@ const THREE = await import('three');
 const { Physics, KIND } = await import('./physics.js');
 const { buildMaterials } = await import('./materials.js');
 const city = await import('./city.js');
+const scheme = await import('./scheme.js');
 const { QUALITY } = await import('./settings.js');
 const { createHumanoid } = await import('./humanoid.js');
 const { createVehicle } = await import('./vehicle.js');
@@ -116,9 +117,10 @@ const t0 = Date.now();
 const C = city.buildCity(scene, phys, mats, QUALITY.medium, 20260805);
 console.log(`  (generated in ${Date.now() - t0}ms - ${Math.round(C.triangles / 1000)}k triangles, ${phys.boxes.length} colliders)`);
 
-ok(C.nodes.length === city.N * city.N, `road graph has ${C.nodes.length} intersections`);
+ok(C.nodes.length === city.N * city.N + 24, `road graph has ${C.nodes.length} intersections (36 city + 24 scheme)`);
 ok(C.nodes.every((n) => n.nb.length >= 2), 'every intersection connects to its neighbours');
-ok(C.pedLoops.length === (city.N - 1) * (city.N - 1), `${C.pedLoops.length} pavement loops (one per block)`);
+ok(C.pedLoops.length === (city.N - 1) * (city.N - 1) + 9,
+  `${C.pedLoops.length} pedestrian routes (25 city blocks + 8 scheme kerbs + park)`);
 ok(C.shops.length >= 6, `${C.shops.length} shop counters`);
 ok(C.parkSpots.length >= 20, `${C.parkSpots.length} parking spots`);
 ok(C.itemSpots.length >= 8, `${C.itemSpots.length} candidate objective spots`);
@@ -169,6 +171,57 @@ ok(startGround > 0.1, `player starts on the pavement (y=${startGround})`);
 // nothing should be floating: every collider must start at or below ground level
 const floating = phys.boxes.filter((b) => b.bottom > 0.2);
 ok(floating.length === 0, 'no collider floats above the ground', `${floating.length} floating`);
+
+/* -- Rahim Garden housing scheme ----------------------------------------- */
+console.log(`
+rahim garden housing scheme`);
+{
+  const P = scheme.PLAN;
+  ok(Math.abs(P.R30 - 9.144) < 0.01 && Math.abs(P.R50 - 15.24) < 0.01,
+    `built to the plan road widths (30ft=${P.R30.toFixed(2)}m, 50ft=${P.R50.toFixed(2)}m)`);
+  ok(Math.abs(P.PARK_W - 21.336) < 0.01, `central park is the plan 70ft (${P.PARK_W.toFixed(2)}m)`);
+  ok(Math.abs(P.PLOT_W - 15.24) < 0.01, `plot frontage is the plan 50ft (${P.PLOT_W.toFixed(2)}m)`);
+
+  const plots = C.minimap.buildings.filter((o) => o.z > 210);
+  ok(plots.length > 110, `${plots.length} plots and civic buildings in the scheme`);
+
+  ok(C.bounds.maxZ > 500 && C.bounds.maxZ < 600, `world extends south to z=${C.bounds.maxZ.toFixed(0)}`);
+  ok(C.bounds.minZ < -200, 'the city end of the world is unchanged');
+
+  // the scheme has to be reachable: its entrances must link to city intersections
+  const cityNodes = C.nodes.filter((n) => n.z <= 200);
+  const schemeNodes = C.nodes.filter((n) => n.z > 200);
+  const links = schemeNodes.filter((n) => n.nb.some((k) => cityNodes.includes(k)));
+  ok(links.length === 4, `${links.length} scheme streets connect through to the city grid`);
+  ok(schemeNodes.every((n) => n.nb.length >= 2), 'every scheme junction has at least two exits');
+
+  // flood fill: traffic must be able to drive from the city into the scheme and back
+  const seen = new Set([C.nodes[0]]);
+  const queue = [C.nodes[0]];
+  while (queue.length) {
+    const n = queue.pop();
+    for (const k of n.nb) if (!seen.has(k)) { seen.add(k); queue.push(k); }
+  }
+  ok(seen.size === C.nodes.length, `all ${C.nodes.length} junctions reachable from one another`);
+
+  ok(C.playerStart.z > 210, 'the player now lives in Rahim Garden');
+  const homeGround = phys.groundHeight(C.playerStart.x, C.playerStart.z, 0.34, 3);
+  phys.resolveCircle(C.playerStart.x, C.playerStart.z, 0.34, homeGround, homeGround + 1.78, 0.45, false);
+  ok(!phys.outHit, 'the home spawn is clear of walls and gate posts');
+  ok(!onRoad(C.playerStart.x, C.playerStart.z), 'the home spawn is not in the street');
+  ok(C.pois.some((q) => q.kind === 'gate'), 'the entrance gate is a map landmark');
+  ok(C.pois.some((q) => q.name === 'RAHIM GARDEN PARK'), 'the central park is a map landmark');
+
+  // an entry edge must carry the scheme street's width, not the city's 16m
+  const entryWidths = [];
+  for (const n of cityNodes) {
+    for (let i = 0; i < n.nb.length; i++) {
+      if (n.nb[i].z > 200) entryWidths.push(n.nbWidth[i]);
+    }
+  }
+  ok(entryWidths.length === 4 && entryWidths.every((w) => w < 16),
+    `entry lanes sized to the scheme streets (${entryWidths.map((w) => w.toFixed(1)).join(', ')}m)`);
+}
 
 console.log(`\n${fails === 0 ? 'ALL PASS' : fails + ' FAILURES'}\n`);
 process.exit(fails ? 1 : 0);

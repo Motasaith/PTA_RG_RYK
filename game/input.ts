@@ -148,6 +148,17 @@ export class Input {
     return false;
   }
 
+  /**
+   * Swallow this frame's press so a single tap cannot be acted on twice.
+   *
+   * The frame runs several independent handlers (driving, then world interaction), and the
+   * key edge lives until endFrame(). Without consuming it, tapping E in a car exits the
+   * vehicle and the interaction pass immediately puts you back in it.
+   */
+  consume(a: Action): void {
+    for (const code of this.binds[a]) this.edge.delete(code);
+  }
+
   axis(neg: Action, pos: Action): number {
     return (this.isDown(pos) ? 1 : 0) - (this.isDown(neg) ? 1 : 0);
   }

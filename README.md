@@ -61,11 +61,23 @@ separate aim sensitivity and invert-Y.
 
 ## What is in the game
 
-- **City** — 5×5 blocks on a strict road grid: carriageway, kerb, 4 m pavement,
-  then buildable lots. Downtown towers, shop rows with signage, walled houses
-  with gates/driveways/rooftop water tanks, parks with a pond and a cricket
-  pitch, a mosque with dome and minarets, a supermarket, a police station, car
-  parks, and a plaza with a clock tower and fountain.
+- **The map** — two districts joined at one arterial, ~440 m x 760 m in total.
+
+  **Rahim Garden Housing Scheme** (south) is the real society, built from its own
+  layout plan, at 1:1 in metres: 50' x 103' plots, 30'/40'/50' road hierarchy, the
+  70'-wide central park with the masjid on its east end and the community hall and
+  parking on its west, the 50' entrance boulevard with the scheme's gate and
+  "near Gulshan-e-Iqbal Scheme No. 3" board, and Link Rd along the east edge.
+  132 plots, each with a boundary wall, gate posts carrying its **plot number**,
+  driveway, courtyard and flat-roofed house with a rooftop water tank. Roughly one
+  plot in seven is still vacant with a PLOT AVAILABLE board — encircled plots are
+  available, as the banner says. You live on plot 34.
+
+  **Rahim Garden City** (north) is invented, and supplies what a plot scheme has
+  no room for: 5x5 blocks of downtown towers, shop rows with signage, a
+  supermarket, a police station, a mosque, parks with a pond and a cricket pitch,
+  car parks, and a plaza with a clock tower and fountain — plus the wide roads
+  that make driving fun.
 - **Traffic** — left-hand traffic (as in Pakistan) on a proper lane graph. AI
   cars run the *same* physics as the player, so they understeer, queue, get
   shunted and recover their lane. Jams break themselves up after 5 s.
@@ -96,7 +108,9 @@ components/         React HUD, menus, settings — DOM only, no game logic
 game/
   engine.ts         orchestrator: player controller, weapons, heat, missions, frame loop
   physics.ts        AABB world + spatial hash: ground query, cylinder resolve, raycast
-  city.ts           deterministic city generator + geometry batcher
+  layout.ts         geometry batcher, street furniture, road-graph types, plot-number atlas
+  city.ts           the invented grid city, and the district that stitches it all together
+  scheme.ts         the real Rahim Garden housing scheme, authored from its layout plan
   humanoid.ts       11-joint character rig + procedural animation
   vehicle.ts        bicycle-model arcade vehicle physics + car models
   traffic.ts        lane-graph vehicle AI (drives the same physics as the player)
@@ -124,6 +138,20 @@ Choices worth knowing about:
 - **Movement is sub-stepped.** Steps are subdivided by distance travelled, so
   nothing tunnels through a wall at any frame rate, and every smoothing call is
   exponential (frame-rate independent).
+- **Nothing is scattered at random.** Both districts place props against an
+  explicit zoning rule — the city against its road/pavement/lot bands, the scheme
+  against its plan-derived plot rows — and the tests assert that no building,
+  tree, lamp, vendor, spawn point or pedestrian waypoint ever overlaps a
+  carriageway. That is checked against the generator's own road data, so it covers
+  the scheme's 9 m streets as well as the city's 16 m ones.
+- **One road graph, no grid assumptions.** Traffic picks its next turn
+  geometrically rather than from grid indices, and each edge carries its own
+  carriageway width, so cars keep left correctly on a 30' scheme street and on a
+  city arterial alike.
+- **One key press fires one action.** Handlers run in sequence within a frame and
+  all read the same key edge, so acting on a press consumes it. Without that,
+  tapping E in a car exits the vehicle and the interaction pass immediately puts
+  you back in — a bug that looks like "E doesn't work".
 - **Aiming is analytic.** Bullets come from a hand-written ray against the
   collision grid and character spheres — the player is never a candidate, and the
   camera sits over the right shoulder, so the crosshair cannot land on your own

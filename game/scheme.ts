@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { chance, pick, ri, rr, Rng } from './mathx';
+import { chance, ri, rr, Rng } from './mathx';
 import { Mats, signTexture } from './materials';
 import { KIND, Physics } from './physics';
 import { QualityPreset } from './settings';
@@ -49,8 +49,8 @@ export interface SchemeResult {
   parkCentre: { x: number; z: number };
   south: number;
   plots: number;
-  /** nodes on the scheme's north edge, keyed by x, for wiring into the city grid */
-  northNodes: Map<number, RoadNode>;
+  /** the scheme's four entrances, for wiring into the city grid at the right width */
+  entrances: { x: number; w: number; node: RoadNode }[];
 }
 
 export function buildScheme(
@@ -124,8 +124,7 @@ export function buildScheme(
       if (vi > 0) connect(grid[vi - 1][ri2], grid[vi][ri2], roads[ri2].w);
     }
   }
-  const northNodes = new Map<number, RoadNode>();
-  for (let vi = 0; vi < verticals.length; vi++) northNodes.set(verticals[vi].x, grid[vi][0]);
+  const entrances = verticals.map((v, vi) => ({ x: v.x, w: v.w, node: grid[vi][0] }));
 
   /* ── plot rows ────────────────────────────────────────────────────────── */
   // Frontages are split by the vertical streets, then divided evenly — exactly how a real
@@ -149,10 +148,18 @@ export function buildScheme(
     if (band.kind !== 'plots') continue;
     const frontZ = band.face < 0 ? band.z0 : band.z0 + PLOT_D;          // street edge
     const backZ = band.face < 0 ? band.z0 + PLOT_D : band.z0;           // rear edge
-    // raised kerb strip along the frontage
-    const kerbZ = frontZ + band.face * (KERB / 2);
-    B.box(mats.concrete, (SCHEME_WEST + SCHEME_EAST) / 2, WALK_Y / 2, kerbZ, SCHEME_EAST - SCHEME_WEST, WALK_Y, KERB, 0, 3);
-    phys.addCentered((SCHEME_WEST + SCHEME_EAST) / 2, kerbZ, (SCHEME_EAST - SCHEME_WEST) / 2, KERB / 2, 0, WALK_Y, KIND.Ground);
+    // `into` points from the street towards the rear of the plot — the direction every
+    // piece of the plot is laid out along. Getting this backwards puts houses in the road.
+    const into = -band.face;
+    // raised kerb strip, taken out of the plot band so it never eats the carriageway
+    const kerbZ = frontZ + into * (KERB / 2);
+    B.box(mats.concrete, (SCHEME_WEST + SCHEME_EAST) / 2, LOT_Y / 2, kerbZ, SCHEME_EAST - SCHEME_WEST, LOT_Y, KERB, 0, 3);
+    // One ground slab for the whole band. Without it the plots would have visual ground at
+    // LOT_Y and collision ground at 0, and you would walk around ankle-deep in your garden.
+    phys.addBox(
+      SCHEME_WEST, Math.min(band.z0, band.z0 + PLOT_D),
+      SCHEME_EAST, Math.max(band.z0, band.z0 + PLOT_D), 0, LOT_Y, KIND.Ground,
+    );
     // pedestrians walk the kerb, never the tarmac
     C.pedLoops.push([
       { x: SCHEME_WEST + 8, z: kerbZ },
@@ -167,7 +174,7 @@ export function buildScheme(
         const cx = seg.x0 + w * (i + 0.5);
         const no = plotNo++;
         const vacant = no % 7 === 3;
-        const front = frontZ + band.face * KERB;
+        const front = frontZ + into * KERB;
         const res = plot(B, phys, mats, rng, C, {
           cx, w, front, back: backZ, face: band.face, no, vacant, boardMat, preset,
         });
@@ -178,6 +185,8 @@ export function buildScheme(
 
   /* ── the 70 ft central park ───────────────────────────────────────────── */
   {
+    // ground slab covering the park band, the masjid plot and the community area
+    phys.addBox(SCHEME_WEST, parkBand.z0, SCHEME_EAST, parkBand.z0 + PARK_W, 0, LOT_Y, KIND.Ground);
     const px0 = -30, px1 = 150;
     const capR = PARK_W / 2;
     const midX = (px0 + px1) / 2;
@@ -235,7 +244,7 @@ export function buildScheme(
     }
     C.pois.push({ name: 'MASJID', x: mx, z: mz - PARK_W / 2 - 3, kind: 'mosque' });
     C.itemSpots.push({ x: mx + 14, y: LOT_Y + 0.25, z: mz + 8 });
-    sign(B, C, 'JAMIA MASJID RAHIM GARDEN', '#1f6b45', mx, LOT_Y + 4.4, mz - PARK_W / 2 + 0.85, 0, 11, 1.4);
+    sign(B, C, mats, 'JAMIA MASJID RAHIM GARDEN', '#1f6b45', mx, LOT_Y + 4.4, mz - PARK_W / 2 + 0.85, 0, 11, 1.4);
   }
 
   /* ── community hall + parking on the west end of the park band ────────── */
@@ -247,7 +256,7 @@ export function buildScheme(
     B.box(mats.glass, cx - 22, LOT_Y + 1.9, cz - 6.1, 12, 2.6, 0.12, 0, 0);
     phys.addCentered(cx - 22, cz, 10, 6, 0, LOT_Y + 5.2, KIND.Building);
     C.minimap.buildings.push({ x: cx - 22, z: cz, w: 20, d: 12 });
-    sign(B, C, 'COMMUNITY CENTRE', '#8a4a2a', cx - 22, LOT_Y + 4.2, cz - 6.25, 0, 11, 1.3);
+    sign(B, C, mats, 'COMMUNITY CENTRE', '#8a4a2a', cx - 22, LOT_Y + 4.2, cz - 6.25, 0, 11, 1.3);
     // parking bays
     for (let i = 0; i < 6; i++) {
       const bx = cx + 2 + i * 6.4;
@@ -269,14 +278,14 @@ export function buildScheme(
       phys.addCentered(px, gz, 1.1, 1.1, 0, LOT_Y + 6.4, KIND.Building);
     }
     B.box(mats.plaster[2], gx, LOT_Y + 6.9, gz, R50 + 3.2, 1.9, 1.1, 0, 4);
-    sign(B, C, 'RAHIM GARDEN HOUSING SCHEME', '#b8342a', gx, LOT_Y + 7.2, gz - 0.6, Math.PI, R50 + 2, 1.25);
-    sign(B, C, 'NEAR GULSHAN-E-IQBAL SCHEME NO. 3', '#14335e', gx, LOT_Y + 5.6, gz - 1.2, Math.PI, R50, 0.85);
+    sign(B, C, mats, 'RAHIM GARDEN HOUSING SCHEME', '#b8342a', gx, LOT_Y + 7.2, gz - 0.6, Math.PI, R50 + 2, 1.25);
+    sign(B, C, mats, 'NEAR GULSHAN-E-IQBAL SCHEME NO. 3', '#14335e', gx, LOT_Y + 5.6, gz - 1.2, Math.PI, R50, 0.85);
     C.pois.push({ name: 'RAHIM GARDEN', x: gx, z: gz + 6, kind: 'gate' });
   }
 
   /* ── street signs + lamps along the boulevard ─────────────────────────── */
-  sign(B, C, "MAIN BOULEVARD 50'", '#14335e', SCHEME_BLVD + R50 / 2 + 2.6, LOT_Y + 2.4, SCHEME_TOP + 26, Math.PI / 2, 5, 0.8, true);
-  sign(B, C, 'LINK RD', '#14335e', SCHEME_EAST - R30 / 2 - 2.4, LOT_Y + 2.4, SCHEME_TOP + 30, -Math.PI / 2, 4, 0.8, true);
+  sign(B, C, mats, "MAIN BOULEVARD 50'", '#14335e', SCHEME_BLVD + R50 / 2 + 2.6, LOT_Y + 2.4, SCHEME_TOP + 26, Math.PI / 2, 5, 0.8, true);
+  sign(B, C, mats, 'LINK RD', '#14335e', SCHEME_EAST - R30 / 2 - 2.4, LOT_Y + 2.4, SCHEME_TOP + 30, -Math.PI / 2, 4, 0.8, true);
   for (const r of roads) {
     for (const v of verticals) {
       if (v.x === SCHEME_EAST) continue;
@@ -294,7 +303,7 @@ export function buildScheme(
     parkCentre: { x: 60, z: parkZ },
     south,
     plots: plotNo - 1,
-    northNodes,
+    entrances,
   };
 }
 
@@ -318,6 +327,7 @@ function plot(
   B: Builder, phys: Physics, mats: Mats, rng: Rng, C: Collect, o: PlotOpts,
 ): { x: number; z: number; yaw: number } {
   const { cx, face, no } = o;
+  const into = -face;                          // street → rear of plot
   const halfW = o.w / 2 - 0.35;
   const depth = Math.abs(o.back - o.front);
   const centreZ = (o.front + o.back) / 2;
@@ -351,7 +361,7 @@ function plot(
     B.cyl(mats.metal, cx, LOT_Y + 1.1, o.front + face * -3, 0.05, 0.05, 2.2, 6);
     B.push(o.boardMat, new THREE.PlaneGeometry(2.2, 0.74), cx, LOT_Y + 2.1, o.front + face * -3.03, face < 0 ? Math.PI : 0);
     if (chance(rng, 0.4)) C.pickupSpots.push({ x: cx, z: centreZ });
-    return { x: cx, z: o.front + face * 3, yaw };
+    return { x: cx, z: o.front + into * 3, yaw };
   }
 
   // house: fills most of the frontage, set back to leave a courtyard, flat roof + parapet
@@ -359,7 +369,7 @@ function plot(
   const hd = Math.min(depth - 12, 15);
   const storeys = chance(rng, 0.42) ? 2 : 1;
   const h = storeys * 3.35;
-  const hz = o.front + face * (depth - hd / 2 - 1.2);
+  const hz = o.front + into * (depth - hd / 2 - 1.2);
   const wall = mats.plaster[ri(rng, 0, 5)];
   B.box(wall, cx, LOT_Y + h / 2, hz, hw, h, hd, 0, 5);
   B.box(mats.concrete, cx, LOT_Y + h + 0.28, hz, hw + 0.5, 0.55, hd + 0.5, 0, 3);   // parapet
@@ -367,35 +377,35 @@ function plot(
   C.minimap.buildings.push({ x: cx, z: hz, w: hw, d: hd });
 
   // street elevation: door, grille windows, sunshade, and a first-floor balcony
-  const fz = hz - face * (hd / 2 + 0.07);
+  const fz = hz - into * (hd / 2 + 0.07);      // the elevation that faces the street
   B.box(mats.wood, cx - hw / 2 + 1.6, LOT_Y + 1.15, fz, 1.15, 2.3, 0.14, 0, 2);
   for (const ox of [1.2, 4]) {
     B.box(mats.glass, cx - hw / 2 + 1.6 + ox + 1.4, LOT_Y + 1.8, fz, 1.5, 1.4, 0.1, 0, 0);
   }
   if (o.preset.detail) {
-    B.box(mats.concrete, cx, LOT_Y + 2.65, fz - face * 0.45, hw * 0.92, 0.18, 1.1, 0, 3);
+    B.box(mats.concrete, cx, LOT_Y + 2.65, fz + face * 0.45, hw * 0.92, 0.18, 1.1, 0, 3);
   }
   if (storeys === 2) {
     for (const ox of [-3.4, 0, 3.4]) {
       B.box(mats.glass, cx + ox, LOT_Y + 4.95, fz, 1.4, 1.3, 0.1, 0, 0);
     }
-    B.box(mats.concrete, cx, LOT_Y + 3.5, fz - face * 0.7, hw * 0.8, 0.2, 1.6, 0, 3);
+    B.box(mats.concrete, cx, LOT_Y + 3.5, fz + face * 0.7, hw * 0.8, 0.2, 1.6, 0, 3);
     for (let i = 0; i < 7; i++) {
-      B.box(mats.metal, cx - hw * 0.36 + i * (hw * 0.72 / 6), LOT_Y + 4, fz - face * 1.4, 0.06, 0.9, 0.06, 0, 2);
+      B.box(mats.metal, cx - hw * 0.36 + i * (hw * 0.72 / 6), LOT_Y + 4, fz + face * 1.4, 0.06, 0.9, 0.06, 0, 2);
     }
   }
   // rooftop water tank + stair enclosure
-  B.box(mats.plaster[1], cx + hw / 2 - 1.8, LOT_Y + h + 1.4, hz + face * (hd / 2 - 1.8), 3, 2.2, 3, 0, 4);
+  B.box(mats.plaster[1], cx + hw / 2 - 1.8, LOT_Y + h + 1.4, hz + into * (hd / 2 - 1.8), 3, 2.2, 3, 0, 4);
   B.cyl(mats.metal, cx - hw / 2 + 1.6, LOT_Y + h + 1.2, hz, 0.62, 0.62, 1.25, 10);
 
   // driveway from the gate to the house
   const dz = (o.front + hz) / 2;
   B.quad(mats.concrete, cx, LOT_Y + 0.012, dz, 4.6, Math.abs(hz - o.front) - hd / 2, 3);
-  if (chance(rng, 0.35)) C.parkSpots.push({ x: cx, z: o.front + face * 4.2, yaw });
-  if (chance(rng, 0.3)) tree(B, phys, rng, cx + halfW - 1.6, o.front + face * 5, 0.8, LOT_Y);
-  if (no % 23 === 0) C.itemSpots.push({ x: cx, y: LOT_Y + 0.25, z: o.front + face * 4 });
+  if (chance(rng, 0.35)) C.parkSpots.push({ x: cx, z: o.front + into * 4.2, yaw });
+  if (chance(rng, 0.3)) tree(B, phys, rng, cx + halfW - 1.6, o.front + into * 5, 0.8, LOT_Y);
+  if (no % 23 === 0) C.itemSpots.push({ x: cx, y: LOT_Y + 0.25, z: o.front + into * 4 });
 
-  return { x: cx, z: o.front + face * 3.2, yaw };
+  return { x: cx, z: o.front + into * 3.2, yaw };
 }
 
 /* ── bits and pieces ──────────────────────────────────────────────────────── */
@@ -420,7 +430,7 @@ function playground(B: Builder, phys: Physics, mats: Mats, x: number, z: number)
 }
 
 function sign(
-  B: Builder, C: Collect, text: string, bg: string,
+  B: Builder, C: Collect, mats: Mats, text: string, bg: string,
   x: number, y: number, z: number, rotY: number, w: number, h: number, post = false,
 ): void {
   const mesh = new THREE.Mesh(
@@ -433,19 +443,8 @@ function sign(
   mesh.position.set(x, y, z);
   mesh.rotation.y = rotY;
   C.signs.push(mesh);
-  if (post) {
-    // a plain post; merged with the rest of the metalwork
-    B.cyl((mesh.material as THREE.MeshBasicMaterial).map ? MET() : MET(), x, (y + LOT_Y) / 2, z, 0.055, 0.07, y - LOT_Y, 6);
-  }
+  if (post) B.cyl(mats.metal, x, (y + LOT_Y) / 2, z, 0.055, 0.07, y - LOT_Y, 6);
 }
 
-let metCache: THREE.MeshStandardMaterial | null = null;
-function MET(): THREE.MeshStandardMaterial {
-  if (!metCache) metCache = new THREE.MeshStandardMaterial({ color: 0x8d949b, roughness: 0.5, metalness: 0.5 });
-  return metCache;
-}
-
-export { PARK_W as SCHEME_PARK_W, R30 as SCHEME_R30, R50 as SCHEME_R50 };
-export const SCHEME_PLOT_W = PLOT_W;
-export const SCHEME_PLOT_D = PLOT_D;
-export function schemeUnused(_: unknown): void { void pick; }
+/** The plan's own dimensions, exported so the tests can check we built to them. */
+export const PLAN = { R30, R40, R50, PARK_W, PLOT_D, PLOT_W, KERB } as const;
