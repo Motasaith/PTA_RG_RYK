@@ -6,3 +6,10 @@ next-env.d.ts
 .DS_Store
 .smoke-build
 _archive
+
+# secrets — never commit
+.env
+.env.*
+!.env.example
+.dev.vars
+.wrangler
