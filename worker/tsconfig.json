@@ -1,0 +1,16 @@
+{
+  "comment": "The Worker compiles against the Cloudflare runtime, not the DOM. Kept separate so the game's own typecheck stays independent.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["@cloudflare/workers-types"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "esModuleInterop": true
+  },
+  "include": ["**/*.ts", "../game/protocol.ts"]
+}

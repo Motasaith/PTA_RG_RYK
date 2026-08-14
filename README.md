@@ -15,29 +15,60 @@ npm run cf:deploy  # build + wrangler pages deploy out
 
 ## Deploying to Cloudflare
 
-Yes — this runs on Cloudflare with no compromises, because it is 100% client-side.
-`next.config.mjs` sets `output: 'export'`, so `npm run build` produces a plain
-static site in `out/`.
+The whole thing is **one Worker**. It serves the static game for every normal request and
+handles the small multiplayer API itself.
 
-**Option A — Pages via CLI**
+> **This replaces the old Pages deployment.** A Pages project *cannot* define a Durable
+> Object, and the game rooms and lobby are Durable Objects, so Pages cannot host this.
+> Cloudflare's own guidance is to migrate Pages projects to Workers.
+
+### First deploy
 
 ```bash
-npm run cf:deploy          # npx wrangler pages deploy out
+npx wrangler login              # once per machine
+npm run cf:deploy               # next build && wrangler deploy
 ```
 
-**Option B — Pages via Git integration**
+That prints a public URL — `https://rahim-garden-city.<your-subdomain>.workers.dev` — which
+anybody in the world can open. The Durable Object namespaces are created automatically from
+the `migrations` entry on that first deploy.
 
-| Setting                | Value                   |
-| ---------------------- | ----------------------- |
-| Framework preset       | Next.js (Static Export) |
-| Build command          | `npm run build`         |
-| Build output directory | `out`                   |
+Then enable the admin dashboard:
 
-`wrangler.toml` already declares `pages_build_output_dir = "out"`.
+```bash
+openssl rand -base64 24         # copy the output
+npx wrangler secret put ADMIN_TOKEN
+```
 
-There is no Node runtime, no SSR and nothing in the hot path but static assets,
-so you stay on the free tier with no cold starts. If you later want cloud saves
-or a leaderboard, that is the point to add a Worker + KV.
+### Retire the old Pages project
+
+The Pages project keeps serving the **old** build at its own URL until you deal with it, so
+you would have two different versions live. In the Cloudflare dashboard:
+
+1. Move any custom domain off the Pages project (Workers & Pages → your Worker →
+   Settings → Domains & Routes → Add custom domain).
+2. Delete the Pages project, or leave it as an archive if you prefer.
+
+### Day to day
+
+```bash
+npm run dev        # game only, fast reloads — NO multiplayer (there is no Worker)
+npm run cf:dev     # build + run the real Worker locally, multiplayer works
+npm run cf:deploy  # ship it
+```
+
+`npm run dev` cannot serve `/api/*`, so the ONLINE tab will never connect there. Use
+`cf:dev` to test multiplayer locally, and remember that a local URL is only reachable from
+your own machine — friends need the deployed one.
+
+If `cf:dev` fails to start, run `npm approve-scripts` once: npm defers `workerd`'s
+installer, and `wrangler dev` needs that binary.
+
+### Cost
+
+Free plan throughout. Durable Objects have been on the Workers Free plan since April 2025,
+**with the SQLite storage backend only** — which is why `wrangler.jsonc` uses
+`new_sqlite_classes`. There is no database and nothing is stored.
 
 ## Controls
 

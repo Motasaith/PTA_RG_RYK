@@ -62,16 +62,29 @@ export function Title({ onStart, onSettings }: { onStart: () => void; onSettings
 
 /* ── pause + settings ─────────────────────────────────────────────────────── */
 
-type Tab = 'display' | 'controls' | 'audio' | 'game';
+type Tab = 'display' | 'controls' | 'audio' | 'game' | 'online';
+
+export interface NetUi {
+  status: 'offline' | 'connecting' | 'online' | 'error';
+  room: string;
+  error: string;
+  peers: number;
+  names: string[];
+  onHost: (name: string, isPublic: boolean) => void;
+  onJoin: (code: string, name: string) => void;
+  onQuick: (name: string) => void;
+  onLeave: () => void;
+}
 
 export function PauseMenu({
-  settings, onChange, onResume, onRestart, capture,
+  settings, onChange, onResume, onRestart, capture, net,
 }: {
   settings: Settings;
   onChange: (s: Settings) => void;
   onResume: () => void;
   onRestart: () => void;
   capture: (cb: (code: string) => void) => void;
+  net: NetUi;
 }) {
   const [tab, setTab] = useState<Tab>('display');
   const [listening, setListening] = useState<string | null>(null);
@@ -96,7 +109,7 @@ export function PauseMenu({
         <div className="panelhead">
           <h2>PAUSED</h2>
           <div className="tabs">
-            {(['display', 'controls', 'audio', 'game'] as Tab[]).map((t) => (
+            {(['display', 'controls', 'audio', 'game', 'online'] as Tab[]).map((t) => (
               <button key={t} className={t === tab ? 'tab on' : 'tab'} onClick={() => setTab(t)}>
                 {t.toUpperCase()}
               </button>
@@ -173,6 +186,8 @@ export function PauseMenu({
               </div>
             </>
           )}
+
+          {tab === 'online' && <OnlinePanel net={net} />}
         </div>
 
         <div className="panelfoot">
@@ -229,6 +244,86 @@ function Toggle({
 }
 
 /* ── death + win ──────────────────────────────────────────────────────────── */
+
+/** Room hosting / joining. Free-roam is peer-visible only — see docs/multiplayer.md. */
+function OnlinePanel({ net }: { net: NetUi }) {
+  const [name, setName] = useState(() => {
+    try {
+      return localStorage.getItem('rgc.name') ?? '';
+    } catch {
+      return '';
+    }
+  });
+  const [code, setCode] = useState('');
+  const [isPublic, setPublic] = useState(false);
+
+  const remember = (v: string) => {
+    setName(v);
+    try {
+      localStorage.setItem('rgc.name', v);
+    } catch { /* private mode */ }
+  };
+  const player = name.trim() || 'Player';
+
+  if (net.status === 'online' || net.status === 'connecting') {
+    return (
+      <>
+        <div className="netroom">
+          <div className="netlabel">{net.status === 'online' ? 'ROOM CODE' : 'CONNECTING…'}</div>
+          <div className="netcode">{net.room}</div>
+          <div className="hintline">Share this code. Up to 8 players in the city at once.</div>
+        </div>
+        <div className="netlist">
+          <div className="netlabel">IN THIS ROOM ({net.peers + 1})</div>
+          <div className="netnames">
+            <span className="me">{player} (you)</span>
+            {net.names.map((n, i) => <span key={i}>{n}</span>)}
+            {net.peers === 0 && <em>waiting for friends…</em>}
+          </div>
+        </div>
+        <button className="btn" onClick={net.onLeave}>LEAVE ROOM</button>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <label className="field">
+        <span>Your name</span>
+        <input value={name} onChange={(e) => remember(e.target.value)} placeholder="Player" maxLength={24} />
+      </label>
+      <button className="btn primary" onClick={() => net.onHost(player, isPublic)}>HOST A NEW ROOM</button>
+      <Toggle
+        label="List publicly"
+        value={isPublic}
+        onChange={setPublic}
+        hint="Anyone can find your room in Quick Match. Off means code-only."
+      />
+      <div className="netor">or join a friend</div>
+      <label className="field">
+        <span>Room code</span>
+        <input
+          value={code}
+          onChange={(e) => setCode(e.target.value.toUpperCase())}
+          placeholder="ABC23"
+          maxLength={5}
+          style={{ letterSpacing: '.3em', textTransform: 'uppercase' }}
+        />
+      </label>
+      <button className="btn" disabled={code.trim().length !== 5} onClick={() => net.onJoin(code, player)}>
+        JOIN ROOM
+      </button>
+      <div className="netor">or play with anyone</div>
+      <button className="btn" onClick={() => net.onQuick(player)}>QUICK MATCH</button>
+      {net.error && <div className="neterr">{net.error}</div>}
+      <div className="hintline">
+        Free-roam online lets you drive and run around the city together. Everyone keeps their
+        own traffic and pedestrians — only players are shared. No account, and nothing about
+        you is stored: the room exists only while people are in it.
+      </div>
+    </>
+  );
+}
 
 export function Wasted() {
   return (

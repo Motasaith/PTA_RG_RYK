@@ -111,6 +111,17 @@ export default function GameShell() {
           onResume={hud.phase === 'title' ? () => setShowSettings(false) : resume}
           onRestart={restart}
           capture={(cb) => gameRef.current?.getInput().beginCapture(cb)}
+          net={{
+            status: hud.netStatus,
+            room: hud.netRoom,
+            error: hud.netError,
+            peers: hud.netPeers,
+            names: hud.netNames,
+            onHost: (name, isPublic) => gameRef.current?.hostRoom(name, isPublic),
+            onJoin: (code, name) => gameRef.current?.joinRoom(code, name),
+            onQuick: (name) => { void gameRef.current?.quickMatch(name); },
+            onLeave: () => gameRef.current?.leaveRoom(),
+          }}
         />
       )}
 

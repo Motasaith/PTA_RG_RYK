@@ -341,3 +341,123 @@ input[type="range"]::-moz-range-thumb {
   letter-spacing: .14em;
   opacity: .45;
 }
+
+/* ── multiplayer panel ─────────────────────────────────────────────────────── */
+.netroom {
+  padding: 14px 16px;
+  border: 1px solid rgba(125, 243, 255, .22);
+  border-radius: 10px;
+  background: rgba(125, 243, 255, .05);
+}
+.netlabel {
+  font-size: 9px;
+  letter-spacing: .2em;
+  opacity: .55;
+  margin-bottom: 6px;
+}
+.netcode {
+  font: 700 34px/1 ui-monospace, monospace;
+  letter-spacing: .3em;
+  color: #7df3ff;
+}
+.netlist { margin-top: 4px; }
+.netnames {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.netnames > span {
+  font-size: 11px;
+  padding: 4px 9px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, .07);
+  border: 1px solid rgba(255, 255, 255, .1);
+}
+.netnames > span.me {
+  border-color: rgba(125, 243, 255, .4);
+  color: #7df3ff;
+}
+.netnames > em {
+  font-size: 11px;
+  opacity: .45;
+}
+.netor {
+  text-align: center;
+  font-size: 10px;
+  letter-spacing: .18em;
+  opacity: .45;
+  margin: 2px 0;
+}
+.neterr {
+  font-size: 11px;
+  color: #ff8a7a;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 90, 74, .1);
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.field > span {
+  font-size: 10px;
+  letter-spacing: .14em;
+  opacity: .6;
+}
+.field > input {
+  font: 500 14px ui-monospace, monospace;
+  color: #e6eef4;
+  background: rgba(255, 255, 255, .06);
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: 8px;
+  padding: 9px 11px;
+  outline: none;
+}
+.field > input:focus { border-color: rgba(125, 243, 255, .5); }
+
+/* ── admin dashboard ───────────────────────────────────────────────────────── */
+.admin {
+  min-height: 100vh;
+  padding: 32px clamp(16px, 5vw, 56px);
+  background: #0b1016;
+  color: #dce6ee;
+  font: 400 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.admin h1 { font-size: 15px; letter-spacing: .22em; color: #7df3ff; margin: 0; }
+.admin .sub { font-size: 11px; letter-spacing: .14em; opacity: .5; margin: 4px 0 0; }
+.adminhead { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 26px; }
+.signout, .adminbox button {
+  font: 600 11px ui-monospace, monospace; letter-spacing: .16em; color: #dce6ee;
+  background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.16);
+  border-radius: 8px; padding: 9px 15px; cursor: pointer;
+}
+.signout:hover, .adminbox button:hover { border-color: rgba(125,243,255,.5); }
+.adminbox { max-width: 460px; margin: 12vh auto 0; }
+.adminbox form { display: flex; gap: 8px; margin-top: 20px; }
+.adminbox input {
+  flex: 1; font: 400 14px ui-monospace, monospace; color: #e6eef4;
+  background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.14);
+  border-radius: 8px; padding: 10px 12px; outline: none;
+}
+.adminbox input:focus { border-color: rgba(125,243,255,.5); }
+.cards { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 26px; }
+.card {
+  flex: 1 1 150px; padding: 18px 20px; border-radius: 12px;
+  background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.09);
+}
+.cardval { font-size: 32px; font-weight: 700; color: #7df3ff; line-height: 1; }
+.cardlabel { font-size: 9px; letter-spacing: .18em; opacity: .5; margin-top: 8px; }
+.rooms { width: 100%; border-collapse: collapse; font-size: 12px; }
+.rooms th {
+  text-align: left; font-size: 9px; letter-spacing: .16em; opacity: .45;
+  padding: 0 12px 9px; font-weight: 500;
+}
+.rooms td { padding: 11px 12px; border-top: 1px solid rgba(255,255,255,.07); }
+.rooms td.code { color: #7df3ff; letter-spacing: .18em; font-weight: 600; }
+.rooms td.empty { opacity: .4; text-align: center; padding: 28px; }
+.admin .note { font-size: 11px; opacity: .4; margin-top: 22px; max-width: 62ch; line-height: 1.7; }
+.admin .err {
+  font-size: 12px; color: #ff8a7a; background: rgba(255,90,74,.1);
+  padding: 10px 12px; border-radius: 8px; margin: 14px 0;
+}

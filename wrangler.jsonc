@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "rahim-garden-city",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-08-01",
+
+  // The static Next.js export. Every non-/api request is served from here.
+  "assets": { "directory": "./out", "binding": "ASSETS" },
+
+  // One object per game room. `new_sqlite_classes` is required for the free plan —
+  // the older key-value backend is paid-only. See docs/multiplayer.md.
+  "durable_objects": {
+    "bindings": [
+      { "name": "ROOM", "class_name": "GameRoom" },
+      { "name": "LOBBY", "class_name": "Lobby" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GameRoom", "Lobby"] }],
+
+
+  "observability": { "enabled": true }
+}

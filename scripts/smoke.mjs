@@ -15,7 +15,7 @@ const OUT = '.smoke-build';
 const MODULES = [
   'mathx', 'settings', 'physics', 'materials', 'sky', 'city', 'humanoid',
   'weapons', 'vehicle', 'peds', 'traffic', 'combat', 'minimap', 'hudstore',
-  'camerarig', 'audio', 'input',
+  'camerarig', 'audio', 'input', 'water', 'ao', 'layout', 'scheme', 'protocol', 'netclient',
 ];
 
 rmSync(OUT, { recursive: true, force: true });
@@ -49,7 +49,9 @@ for (const f of readdirSync('tests').filter((f) => f.endsWith('.mjs'))) {
 }
 
 let failed = 0;
-for (const f of readdirSync(OUT).filter((f) => f.endsWith('.mjs'))) {
+// every .mjs in tests/ is copied (so suites can import shared helpers), but only
+// *.test.mjs files are executed as suites
+for (const f of readdirSync(OUT).filter((f) => f.endsWith('.test.mjs'))) {
   console.log(`\n=== ${f} ===`);
   try {
     execFileSync(process.execPath, [join(OUT, f)], { stdio: 'inherit' });

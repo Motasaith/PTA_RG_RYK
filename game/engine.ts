@@ -17,6 +17,9 @@ import { MapEnt, MapRenderer } from './minimap';
 import { getHud, setHud } from './hudstore';
 import { QUALITY, QualityPreset, Settings } from './settings';
 import { Input } from './input';
+import { fetchOpenRooms, NetClient } from './netclient';
+import { packFlags, RemotePlayers } from './remoteplayers';
+import { makeRoomCode, normaliseRoomCode } from './protocol';
 import { createWeaponModel, WeaponId, WeaponModel, WEAPON_ORDER, WEAPONS } from './weapons';
 import {
   placeVehicle, seatWorld, stepVehicle, updateVehicleBox, Vehicle, vehicleSpeedKmh,
@@ -144,6 +147,12 @@ export class Game {
   radarCanvas: HTMLCanvasElement | null = null;
   mapCanvas: HTMLCanvasElement | null = null;
 
+  /* ── multiplayer ─────────────────────────────────────────────────────────
+     The net client is created up front but stays offline until the player joins
+     a room, so single-player costs nothing at all. */
+  readonly net = new NetClient();
+  private remotes!: RemotePlayers;
+
   constructor(private canvas: HTMLCanvasElement, private settings: Settings) {
     this.preset = QUALITY[settings.quality];
     this.resScale = this.preset.pixelRatio;
@@ -201,6 +210,8 @@ export class Game {
     this.traffic.streamTo(this.city.playerStart.x, this.city.playerStart.z, 170);
 
     await step(84, 'loading the guns…');
+    this.remotes = new RemotePlayers(this.scene);
+    this.net.onChange = () => this.pushNetHud();
     this.combat = new Combat(this.scene, this.phys);
     this.combat.bloodEnabled = this.settings.blood;
     this.spawnPlayer();
@@ -400,7 +411,51 @@ export class Game {
     this.renderer.setSize(innerWidth, innerHeight, false);
   };
 
+  /* ── multiplayer API for the UI ─────────────────────────────────────────── */
+
+  /** Host a new room and return the code to share. Public rooms also appear in Quick Match. */
+  hostRoom(name: string, isPublic = false): string {
+    const code = makeRoomCode();
+    this.net.connect(code, name, { isPublic });
+    return code;
+  }
+
+  /** Returns false if the code could not possibly be a room code. */
+  joinRoom(code: string, name: string): boolean {
+    const clean = normaliseRoomCode(code);
+    if (!clean) return false;
+    this.net.connect(clean, name);
+    return true;
+  }
+
+  /** Drop into any public room with space; hosts a new public one if there are none. */
+  async quickMatch(name: string): Promise<string> {
+    const rooms = await fetchOpenRooms();
+    const pick = rooms.find((r) => r.players < r.max);
+    if (pick) {
+      this.net.connect(pick.code, name);
+      return pick.code;
+    }
+    return this.hostRoom(name, true);
+  }
+
+  leaveRoom(): void {
+    this.net.disconnect();
+  }
+
+  private pushNetHud(): void {
+    setHud({
+      netStatus: this.net.status,
+      netRoom: this.net.roomCode,
+      netError: this.net.error,
+      netPeers: this.net.peerCount,
+      netNames: [...this.net.peers.values()].map((p) => p.name),
+    });
+  }
+
   dispose(): void {
+    this.net.disconnect();
+    this.remotes?.dispose();
     cancelAnimationFrame(this.raf);
     this.running = false;
     removeEventListener('resize', this.onResize);
@@ -508,6 +563,25 @@ export class Game {
       skyTop: this.sky.topColour(),
       skyHorizon: this.sky.horizonColour(),
     });
+
+    // ── multiplayer: report our own state, draw everyone else's
+    if (this.net.status !== 'offline') {
+      const now = Date.now();
+      this.net.sendState(now, {
+        x: this.px, y: this.py, z: this.pz,
+        yaw: this.vehicle ? this.vehicle.yaw : this.pyaw,
+        flags: packFlags({
+          sprint: this.speed > WALK_SPEED + 0.4,
+          aiming: this.aiming,
+          inVehicle: !!this.vehicle,
+          dead: this.dead,
+          grounded: this.grounded,
+        }),
+        speed: this.speed,
+        weapon: Math.max(0, WEAPON_ORDER.indexOf(this.weapon)),
+      });
+      this.remotes.update(this.net, dt, t, now, this.px, this.pz, this.preset.drawDistance * 0.75);
+    }
 
     this.sky.update(dt, this.camera.position.x, this.camera.position.z, this.tmp.set(this.px, this.py, this.pz));
     this.pushHud(dt);
