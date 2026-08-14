@@ -14,6 +14,7 @@ export default function GameShell() {
   const gameRef = useRef<Game | null>(null);
   const [settings, setSettings] = useState<Settings>(() => loadSettings());
   const [showSettings, setShowSettings] = useState(false);
+  const [menuTab, setMenuTab] = useState<'display' | 'online'>('display');
   const [error, setError] = useState<string | null>(null);
   const hud = useSyncExternalStore(subscribeHud, getHud, getHud);
 
@@ -101,15 +102,29 @@ export default function GameShell() {
       {hud.phase === 'loading' && !error && <Loader pct={hud.loadPct} msg={hud.loadMsg} />}
 
       {hud.phase === 'title' && !showSettings && (
-        <Title onStart={start} onSettings={() => setShowSettings(true)} />
+        <Title
+          onStart={start}
+          onOnline={() => { setMenuTab('online'); setShowSettings(true); }}
+          onSettings={() => { setMenuTab('display'); setShowSettings(true); }}
+        />
       )}
 
       {(hud.phase === 'paused' || (hud.phase === 'title' && showSettings)) && (
         <PauseMenu
           settings={settings}
           onChange={applySettings}
-          onResume={hud.phase === 'title' ? () => setShowSettings(false) : resume}
+          onResume={
+            hud.phase === 'title'
+              ? () => { setShowSettings(false); if (hud.netStatus !== 'offline') start(); }
+              : resume
+          }
+          resumeLabel={
+            hud.phase === 'title'
+              ? (hud.netStatus === 'online' ? 'ENTER THE CITY' : 'BACK')
+              : 'RESUME'
+          }
           onRestart={restart}
+          initialTab={menuTab}
           capture={(cb) => gameRef.current?.getInput().beginCapture(cb)}
           net={{
             status: hud.netStatus,

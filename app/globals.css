@@ -461,3 +461,21 @@ input[type="range"]::-moz-range-thumb {
   font-size: 12px; color: #ff8a7a; background: rgba(255,90,74,.1);
   padding: 10px 12px; border-radius: 8px; margin: 14px 0;
 }
+
+/* PLAY ONLINE deserves to look like a real choice, not a settings row */
+.btn.online {
+  border-color: rgba(125, 243, 255, .45);
+  color: #7df3ff;
+  background: rgba(125, 243, 255, .08);
+}
+.btn.online:hover {
+  background: rgba(125, 243, 255, .16);
+  border-color: rgba(125, 243, 255, .75);
+}
+.onlinehint {
+  margin-top: 12px;
+  font-size: 11px;
+  line-height: 1.7;
+  opacity: .5;
+  max-width: 52ch;
+}

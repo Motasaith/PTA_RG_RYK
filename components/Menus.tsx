@@ -24,7 +24,11 @@ export function Loader({ pct, msg }: { pct: number; msg: string }) {
   );
 }
 
-export function Title({ onStart, onSettings }: { onStart: () => void; onSettings: () => void }) {
+export function Title({ onStart, onOnline, onSettings }: {
+  onStart: () => void;
+  onOnline: () => void;
+  onSettings: () => void;
+}) {
   return (
     <div className="screen title">
       <div className="titlecard">
@@ -51,8 +55,13 @@ export function Title({ onStart, onSettings }: { onStart: () => void; onSettings
           <span><b>ESC</b> pause</span>
         </div>
         <div className="row">
-          <button className="btn primary" onClick={onStart}>PLAY</button>
+          <button className="btn primary" onClick={onStart}>PLAY SOLO</button>
+          <button className="btn online" onClick={onOnline}>PLAY ONLINE</button>
           <button className="btn" onClick={onSettings}>SETTINGS</button>
+        </div>
+        <div className="onlinehint">
+          Online: host a room, share the 5-letter code, and up to 8 of you roam the city
+          together. No account needed and nothing is stored.
         </div>
         <div className="fineprint">Click the game to capture the mouse. Press ESC to release it.</div>
       </div>
@@ -77,7 +86,8 @@ export interface NetUi {
 }
 
 export function PauseMenu({
-  settings, onChange, onResume, onRestart, capture, net,
+  settings, onChange, onResume, onRestart, capture, net, initialTab = 'display',
+  resumeLabel = 'RESUME',
 }: {
   settings: Settings;
   onChange: (s: Settings) => void;
@@ -85,8 +95,10 @@ export function PauseMenu({
   onRestart: () => void;
   capture: (cb: (code: string) => void) => void;
   net: NetUi;
+  initialTab?: Tab;
+  resumeLabel?: string;
 }) {
-  const [tab, setTab] = useState<Tab>('display');
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [listening, setListening] = useState<string | null>(null);
 
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => onChange({ ...settings, [k]: v });
@@ -191,7 +203,7 @@ export function PauseMenu({
         </div>
 
         <div className="panelfoot">
-          <button className="btn primary" onClick={onResume}>RESUME</button>
+          <button className="btn primary" onClick={onResume}>{resumeLabel}</button>
           <button className="btn" onClick={onRestart}>RESTART CITY</button>
         </div>
       </div>
