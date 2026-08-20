@@ -15,7 +15,10 @@ export function radarProject(
   return [centre + u * scale, centre - v * scale];
 }
 
-export type EntKind = 'ped' | 'cop' | 'car' | 'copcar' | 'objective' | 'shop' | 'pickup' | 'corpse';
+export type EntKind =
+  | 'ped' | 'cop' | 'car' | 'copcar' | 'objective' | 'shop' | 'pickup' | 'corpse'
+  /** other players: a teammate, an enemy, or someone in a team-less free-roam room */
+  | 'mate' | 'enemy' | 'player';
 
 export interface MapEnt {
   x: number;
@@ -32,6 +35,10 @@ const COL: Record<EntKind, string> = {
   shop: '#4be1c0',
   pickup: '#b6f36b',
   corpse: '#8b2f2f',
+  // The same two team colours the nameplates use, so the radar and the world agree.
+  mate: '#53e07a',
+  enemy: '#ffa63d',
+  player: '#7df3ff',
 };
 
 /** Canvas 2D radar + full map, drawn straight from the generator's own layout data. */
@@ -188,6 +195,15 @@ export class MapRenderer {
         ctx.fill();
       } else if (e.kind === 'car' || e.kind === 'copcar') {
         ctx.fillRect(x - r * 0.7, y - r * 0.7, r * 1.4, r * 1.4);
+      } else if (e.kind === 'mate' || e.kind === 'enemy' || e.kind === 'player') {
+        // Ringed and oversized: at radar scale another player is one pixel among sixty
+        // pedestrians otherwise, which is useless in exactly the moment you need it.
+        ctx.beginPath();
+        ctx.arc(x, y, r * 1.15, 0, 7);
+        ctx.fill();
+        ctx.lineWidth = Math.max(1, r * 0.35);
+        ctx.strokeStyle = 'rgba(6,10,14,.85)';
+        ctx.stroke();
       } else {
         ctx.beginPath();
         ctx.arc(x, y, e.kind === 'ped' || e.kind === 'corpse' ? r * 0.6 : r * 0.85, 0, 7);

@@ -1,4 +1,5 @@
 import { WeaponId } from './weapons';
+import { KillEvent } from './netclient';
 
 export interface HudState {
   phase: 'loading' | 'title' | 'playing' | 'paused' | 'dead' | 'won';
@@ -40,6 +41,17 @@ export interface HudState {
   netError: string;
   netPeers: number;
   netNames: string[];
+  /** our side: 0 free-roam, 1 or 2 in a match */
+  netTeam: number;
+  /** true when this client owns the ambient traffic; shown so a laggy host is explicable */
+  netHost: boolean;
+  netMode: number;
+  netMatch: number;
+  netScoreA: number;
+  netScoreB: number;
+  netTarget: number;
+  netRoster: { id: number; name: string; team: number; kills: number; deaths: number; you: boolean }[];
+  netFeed: KillEvent[];
 }
 
 const initial: HudState = {
@@ -51,6 +63,8 @@ const initial: HudState = {
   clock: '00:00', hour: 11, fps: 0, triangles: 0, drawCalls: 0,
   aiming: false, hitMarker: 0, crosshairHot: false, busted: false, mapOpen: false,
   netStatus: 'offline', netRoom: '', netError: '', netPeers: 0, netNames: [],
+  netTeam: 0, netHost: false, netMode: 0, netMatch: 0,
+  netScoreA: 0, netScoreB: 0, netTarget: 0, netRoster: [], netFeed: [],
 };
 
 let state: HudState = initial;

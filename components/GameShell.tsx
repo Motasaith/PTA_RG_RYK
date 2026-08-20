@@ -132,10 +132,21 @@ export default function GameShell() {
             error: hud.netError,
             peers: hud.netPeers,
             names: hud.netNames,
-            onHost: (name, isPublic) => gameRef.current?.hostRoom(name, isPublic),
+            team: hud.netTeam,
+            host: hud.netHost,
+            mode: hud.netMode,
+            match: hud.netMatch,
+            scoreA: hud.netScoreA,
+            scoreB: hud.netScoreB,
+            target: hud.netTarget,
+            roster: hud.netRoster,
+            onHost: (name, isPublic, mode) => gameRef.current?.hostRoom(name, isPublic, mode),
             onJoin: (code, name) => gameRef.current?.joinRoom(code, name),
             onQuick: (name) => { void gameRef.current?.quickMatch(name); },
             onLeave: () => gameRef.current?.leaveRoom(),
+            onStartMatch: () => gameRef.current?.startMatch(),
+            onEndMatch: () => gameRef.current?.endMatch(),
+            onTeam: (team) => gameRef.current?.chooseTeam(team),
           }}
         />
       )}

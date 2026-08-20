@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { clamp, damp, fwdX, fwdZ, rgtX, rgtZ } from './mathx';
+import { clamp, damp, fwdX, fwdZ, rgtX, rgtZ, wrapPi } from './mathx';
 import { Box, KIND, Physics } from './physics';
 import { Humanoid } from './humanoid';
 import { tex } from './materials';
@@ -64,6 +64,8 @@ export interface VehicleControl {
 
 export interface Vehicle {
   kind: VehKind;
+  /** body colour as given to createVehicle, kept so the wire can send a palette index */
+  colour: number;
   spec: VehSpec;
   group: THREE.Group;
   wheelMeshes: { mesh: THREE.Object3D; front: boolean }[];
@@ -98,6 +100,11 @@ export interface Vehicle {
   crashT: number;
   bodyRoll: number;
   bodyPitch: number;
+  /**
+   * Stable id for network sync, 0 for a car that is never sent. Assigned by Traffic, not
+   * by createVehicle, because only cars in the ambient set need one.
+   */
+  netId: number;
 }
 
 /* ── model ────────────────────────────────────────────────────────────────── */
@@ -362,7 +369,7 @@ export function createVehicle(kind: VehKind, colour: number): Vehicle {
   }
 
   const v: Vehicle = {
-    kind, spec, group, wheelMeshes, bodyPivot,
+    kind, colour, spec, group, wheelMeshes, bodyPivot,
     brakeLight: brakeMesh, lightbar,
     x: 0, y: 0, z: 0, yaw: 0, vx: 0, vz: 0, speed: 0, steerAngle: 0, wheelSpin: 0,
     health: 100,
@@ -370,7 +377,7 @@ export function createVehicle(kind: VehKind, colour: number): Vehicle {
     ctrl: { throttle: 0, brake: 0, steer: 0, handbrake: false, boost: false },
     driver: null, isPlayer: false, siren: false,
     box: { minX: 0, maxX: 0, minZ: 0, maxZ: 0, bottom: 0, top: spec.height, kind: KIND.Vehicle },
-    ai: null, hornT: 0, crashT: 0, bodyRoll: 0, bodyPitch: 0,
+    ai: null, hornT: 0, crashT: 0, bodyRoll: 0, bodyPitch: 0, netId: 0,
   };
   v.box.owner = v;
   return v;
@@ -549,6 +556,45 @@ function collide(v: Vehicle, phys: Physics): void {
     }
     v.speed *= impact > 8 ? 0.25 : 0.6;
   }
+}
+
+/**
+ * Place a car from an interpolated network pose instead of from physics.
+ *
+ * This is deliberately *not* stepVehicle: running the simulation on a puppet would fight
+ * the incoming positions and produce the shudder you get when prediction and correction
+ * disagree every frame. So we move the car where we are told, and derive just enough
+ * (speed, wheel spin, body roll) to keep it from looking like a sliding cardboard cut-out.
+ */
+export function poseNetVehicle(v: Vehicle, x: number, y: number, z: number, yaw: number, dt: number): void {
+  const dx = x - v.x, dz = z - v.z;
+  const moved = Math.hypot(dx, dz);
+  // Signed by whether the movement is with or against the car's own nose.
+  const forward = dx * fwdX(yaw) + dz * fwdZ(yaw);
+  const inst = dt > 1e-4 ? (forward < 0 ? -moved : moved) / dt : 0;
+  // Quantisation makes the raw delta jittery at low speed; smooth it for the wheels only.
+  v.speed = damp(v.speed, clamp(inst, -70, 70), 8, dt);
+
+  const dYaw = wrapPi(yaw - v.yaw);
+  v.x = x; v.y = y; v.z = z; v.yaw = yaw;
+  v.vx = dt > 1e-4 ? dx / dt : 0;
+  v.vz = dt > 1e-4 ? dz / dt : 0;
+  v.group.position.set(x, y, z);
+  v.group.rotation.y = yaw;
+
+  // Lean into the corner the same way the driven car does, from turn rate rather than steer.
+  const turn = dt > 1e-4 ? dYaw / dt : 0;
+  v.steerAngle = damp(v.steerAngle, clamp(turn * 0.35, -0.5, 0.5), 9, dt);
+  v.bodyRoll = damp(v.bodyRoll, clamp(turn * v.speed * 0.004, -0.09, 0.09), 7, dt);
+  v.bodyPivot.rotation.z = v.bodyRoll;
+  v.bodyPivot.rotation.x = 0;
+
+  v.wheelSpin += (v.speed / v.spec.wheelR) * dt;
+  for (const w of v.wheelMeshes) {
+    if (w.front) w.mesh.rotation.y = -v.steerAngle;
+    w.mesh.children[0].rotation.x = v.wheelSpin;
+  }
+  updateVehicleBox(v);
 }
 
 export function vehicleSpeedKmh(v: Vehicle): number {

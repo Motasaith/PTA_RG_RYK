@@ -73,17 +73,43 @@ export function Title({ onStart, onOnline, onSettings }: {
 
 type Tab = 'display' | 'controls' | 'audio' | 'game' | 'online';
 
+export interface RosterEntry {
+  id: number;
+  name: string;
+  team: number;
+  kills: number;
+  deaths: number;
+  you: boolean;
+}
+
 export interface NetUi {
   status: 'offline' | 'connecting' | 'online' | 'error';
   room: string;
   error: string;
   peers: number;
   names: string[];
-  onHost: (name: string, isPublic: boolean) => void;
+  /** 0 = free-roam, 1 = GREEN, 2 = ORANGE */
+  team: number;
+  /** true when we own the ambient traffic everyone else is watching */
+  host: boolean;
+  /** 0 = freeroam, 1 = team deathmatch */
+  mode: number;
+  /** 0 = lobby, 1 = live, 2 = over */
+  match: number;
+  scoreA: number;
+  scoreB: number;
+  target: number;
+  roster: RosterEntry[];
+  onHost: (name: string, isPublic: boolean, mode: 'freeroam' | 'tdm') => void;
   onJoin: (code: string, name: string) => void;
   onQuick: (name: string) => void;
   onLeave: () => void;
+  onStartMatch: () => void;
+  onEndMatch: () => void;
+  onTeam: (team: number) => void;
 }
+
+const TEAM_LABEL = ['NEUTRAL', 'GREEN', 'ORANGE'];
 
 export function PauseMenu({
   settings, onChange, onResume, onRestart, capture, net, initialTab = 'display',
@@ -268,6 +294,7 @@ function OnlinePanel({ net }: { net: NetUi }) {
   });
   const [code, setCode] = useState('');
   const [isPublic, setPublic] = useState(false);
+  const [mode, setMode] = useState<'freeroam' | 'tdm'>('freeroam');
 
   const remember = (v: string) => {
     setName(v);
@@ -278,22 +305,74 @@ function OnlinePanel({ net }: { net: NetUi }) {
   const player = name.trim() || 'Player';
 
   if (net.status === 'online' || net.status === 'connecting') {
+    const live = net.match === 1;
+    const over = net.match === 2;
     return (
       <>
         <div className="netroom">
           <div className="netlabel">{net.status === 'online' ? 'ROOM CODE' : 'CONNECTING…'}</div>
           <div className="netcode">{net.room}</div>
-          <div className="hintline">Share this code. Up to 8 players in the city at once.</div>
-        </div>
-        <div className="netlist">
-          <div className="netlabel">IN THIS ROOM ({net.peers + 1})</div>
-          <div className="netnames">
-            <span className="me">{player} (you)</span>
-            {net.names.map((n, i) => <span key={i}>{n}</span>)}
-            {net.peers === 0 && <em>waiting for friends…</em>}
+          <div className="hintline">
+            Share this code. Up to 8 players in the city at once.
+            {net.host && ' You are hosting the traffic for this room.'}
           </div>
         </div>
+
+        {net.mode === 1 && (
+          <div className="netmatch">
+            <div className="netlabel">
+              {live ? `TEAM DEATHMATCH — FIRST TO ${net.target}` : over ? 'MATCH OVER' : 'MATCH LOBBY'}
+            </div>
+            <div className="netscore">
+              <span className="t1">GREEN {net.scoreA}</span>
+              <span className="sep">–</span>
+              <span className="t2">{net.scoreB} ORANGE</span>
+            </div>
+          </div>
+        )}
+
+        <div className="netlist">
+          <div className="netlabel">IN THIS ROOM ({net.peers + 1})</div>
+          <Roster roster={net.roster} fallbackName={player} teamed={net.team !== 0} />
+        </div>
+
+        {/* Sides are only meaningful in a match — free-roam has no opposition to join. */}
+        {net.team !== 0 && (
+          <div className="netteams">
+            <button
+              className={`btn teamA${net.team === 1 ? ' on' : ''}`}
+              onClick={() => net.onTeam(1)}
+            >
+              JOIN GREEN
+            </button>
+            <button
+              className={`btn teamB${net.team === 2 ? ' on' : ''}`}
+              onClick={() => net.onTeam(2)}
+            >
+              JOIN ORANGE
+            </button>
+          </div>
+        )}
+
+        {net.host ? (
+          live || over ? (
+            <button className="btn" onClick={net.onEndMatch}>END MATCH — BACK TO FREE-ROAM</button>
+          ) : (
+            <button className="btn primary" onClick={net.onStartMatch}>
+              START TEAM DEATHMATCH
+            </button>
+          )
+        ) : (
+          <div className="hintline">
+            {live ? 'Match in progress.' : 'Waiting for the host to start a match.'}
+          </div>
+        )}
+
         <button className="btn" onClick={net.onLeave}>LEAVE ROOM</button>
+        <div className="hintline">
+          In a match you can shoot, run over and be killed by the other side. Friendly fire is
+          off, and in free-roam nobody can hurt anybody.
+        </div>
       </>
     );
   }
@@ -304,7 +383,25 @@ function OnlinePanel({ net }: { net: NetUi }) {
         <span>Your name</span>
         <input value={name} onChange={(e) => remember(e.target.value)} placeholder="Player" maxLength={24} />
       </label>
-      <button className="btn primary" onClick={() => net.onHost(player, isPublic)}>HOST A NEW ROOM</button>
+      <button className="btn primary" onClick={() => net.onHost(player, isPublic, mode)}>
+        HOST A NEW ROOM
+      </button>
+      <div className="netmodes">
+        <button
+          className={`btn${mode === 'freeroam' ? ' on' : ''}`}
+          onClick={() => setMode('freeroam')}
+        >
+          FREE-ROAM
+        </button>
+        <button className={`btn${mode === 'tdm' ? ' on' : ''}`} onClick={() => setMode('tdm')}>
+          TEAM DEATHMATCH
+        </button>
+      </div>
+      <div className="hintline">
+        {mode === 'freeroam'
+          ? 'Roam the city together. Nobody can hurt anybody.'
+          : 'Two sides, auto-balanced as people join. You start it when everyone is in.'}
+      </div>
       <Toggle
         label="List publicly"
         value={isPublic}
@@ -329,11 +426,39 @@ function OnlinePanel({ net }: { net: NetUi }) {
       <button className="btn" onClick={() => net.onQuick(player)}>QUICK MATCH</button>
       {net.error && <div className="neterr">{net.error}</div>}
       <div className="hintline">
-        Free-roam online lets you drive and run around the city together. Everyone keeps their
-        own traffic and pedestrians — only players are shared. No account, and nothing about
-        you is stored: the room exists only while people are in it.
+        Online play shares the players, the cars they are driving and the moving traffic, so
+        everyone is looking at the same street. Pedestrians and parked cars stay local. No
+        account, and nothing about you is stored: the room exists only while people are in it.
       </div>
     </>
+  );
+}
+
+/** Who is here, split by side once there are sides, with kills once they mean something. */
+function Roster({ roster, fallbackName, teamed }: {
+  roster: RosterEntry[];
+  fallbackName: string;
+  teamed: boolean;
+}) {
+  if (!roster.length) {
+    return (
+      <div className="netnames">
+        <span className="me">{fallbackName} (you)</span>
+        <em>waiting for friends…</em>
+      </div>
+    );
+  }
+  return (
+    <div className="netroster">
+      {roster.map((r) => (
+        <div key={r.id} className={`netrow t${r.team}${r.you ? ' me' : ''}`}>
+          <span className="nm">{r.name}{r.you ? ' (you)' : ''}</span>
+          {teamed && <span className="tm">{TEAM_LABEL[r.team]}</span>}
+          {teamed && <span className="kd">{r.kills}/{r.deaths}</span>}
+        </div>
+      ))}
+      {roster.length === 1 && <em>waiting for friends…</em>}
+    </div>
   );
 }
 

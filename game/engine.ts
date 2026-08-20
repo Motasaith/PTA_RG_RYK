@@ -17,12 +17,16 @@ import { MapEnt, MapRenderer } from './minimap';
 import { getHud, setHud } from './hudstore';
 import { QUALITY, QualityPreset, Settings } from './settings';
 import { Input } from './input';
-import { fetchOpenRooms, NetClient } from './netclient';
+import { fetchOpenRooms, KillEvent, NetClient } from './netclient';
 import { packFlags, RemotePlayers } from './remoteplayers';
-import { makeRoomCode, normaliseRoomCode } from './protocol';
+import {
+  HIT_HEAD, HIT_MELEE, HIT_VEHICLE, Hit as NetHit, MATCH_LIVE, MATCH_OVER, MatchState, MAX_SYNC_CARS,
+  MODE_TDM, TEAM_A, TEAM_B, TEAM_NONE, VEH_KINDS, makeRoomCode, normaliseRoomCode,
+} from './protocol';
 import { createWeaponModel, WeaponId, WeaponModel, WEAPON_ORDER, WEAPONS } from './weapons';
 import {
-  placeVehicle, seatWorld, stepVehicle, updateVehicleBox, Vehicle, vehicleSpeedKmh,
+  CAR_COLOURS, placeVehicle, seatWorld, stepVehicle, updateVehicleBox, Vehicle,
+  vehicleSpeedKmh,
 } from './vehicle';
 
 const WALK_SPEED = 2.3;
@@ -152,6 +156,15 @@ export class Game {
      a room, so single-player costs nothing at all. */
   readonly net = new NetClient();
   private remotes!: RemotePlayers;
+  /**
+   * Who shot us most recently, and when. A kill is credited to whoever landed a hit in the
+   * last few seconds — long enough that finishing someone with a car after shooting them
+   * still counts, short enough that a bullet from two streets ago does not.
+   */
+  private lastAttacker = 0;
+  private lastAttackerT = -99;
+  /** Ambient car we are currently driving, so we can hand it back when we get out. */
+  private claimedCar = 0;
 
   constructor(private canvas: HTMLCanvasElement, private settings: Settings) {
     this.preset = QUALITY[settings.quality];
@@ -211,7 +224,12 @@ export class Game {
 
     await step(84, 'loading the guns…');
     this.remotes = new RemotePlayers(this.scene);
-    this.net.onChange = () => this.pushNetHud();
+    this.net.onChange = () => this.onNetChange();
+    // We own our own health, so damage arrives as a request and is applied here.
+    this.net.onHit = (h) => this.takeNetHit(h);
+    this.net.onKill = (e, killer, victim) => this.onNetKill(e, killer, victim);
+    this.net.onMatch = (m, prev) => this.onMatchChange(m, prev);
+    this.net.onClaim = (car, taken) => this.traffic.setClaimed(car, taken);
     this.combat = new Combat(this.scene, this.phys);
     this.combat.bloodEnabled = this.settings.blood;
     this.spawnPlayer();
@@ -413,17 +431,31 @@ export class Game {
 
   /* ── multiplayer API for the UI ─────────────────────────────────────────── */
 
-  /** Host a new room and return the code to share. Public rooms also appear in Quick Match. */
-  hostRoom(name: string, isPublic = false): string {
+  /**
+   * Host a new room and return the code to share. Public rooms also appear in Quick Match.
+   * `mode` decides whether the room starts as free-roam or as a team deathmatch lobby.
+   */
+  hostRoom(name: string, isPublic = false, mode: 'freeroam' | 'tdm' = 'freeroam'): string {
     const code = makeRoomCode();
-    this.net.connect(code, name, { isPublic });
+    this.goOnline();
+    this.net.connect(code, name, { isPublic, mode });
     return code;
+  }
+
+  /**
+   * Everyone must run the same number of ambient cars, because the host sends all of them
+   * and the count cannot depend on one player's quality preset. Resizing here rather than
+   * at load keeps single-player exactly as it was.
+   */
+  private goOnline(): void {
+    this.traffic.resizeLanes(MAX_SYNC_CARS);
   }
 
   /** Returns false if the code could not possibly be a room code. */
   joinRoom(code: string, name: string): boolean {
     const clean = normaliseRoomCode(code);
     if (!clean) return false;
+    this.goOnline();
     this.net.connect(clean, name);
     return true;
   }
@@ -433,7 +465,8 @@ export class Game {
     const rooms = await fetchOpenRooms();
     const pick = rooms.find((r) => r.players < r.max);
     if (pick) {
-      this.net.connect(pick.code, name);
+      this.goOnline();
+      this.net.connect(pick.code, name, { mode: pick.mode });
       return pick.code;
     }
     return this.hostRoom(name, true);
@@ -443,13 +476,99 @@ export class Game {
     this.net.disconnect();
   }
 
+  /** Start a team deathmatch in the room we are in. Host only — the server enforces it. */
+  startMatch(): void {
+    this.net.startMatch(MODE_TDM);
+  }
+
+  /** Back to free-roam: teams cleared, scores dropped, nobody can shoot anybody. */
+  endMatch(): void {
+    this.net.endMatch();
+  }
+
+  /** Ask to switch sides. Refused by the server if it would make the match lopsided. */
+  chooseTeam(team: number): void {
+    this.net.sendTeam(team);
+  }
+
+  private onNetChange(): void {
+    // Going offline hands the ambient traffic back to us, and the world has to be whole
+    // again — the online set is capped, so a solo player would otherwise be left with the
+    // thinner traffic they had in the room.
+    if (this.net.status !== 'online' && this.traffic?.isPuppet) {
+      this.traffic.setPuppet(false, this.preset.traffic);
+    }
+    // Only on the way out. onChange also fires on every join, kill and team switch, and
+    // releasing here unconditionally handed our car back to the host while we were still
+    // driving it — which put a second copy of it on everyone else's screen.
+    if (this.net.status !== 'online') this.claimedCar = 0;
+    this.pushNetHud();
+  }
+
+  /**
+   * Someone shot us. We apply it ourselves — nobody else can, because health lives here.
+   * The shooter is remembered so that if this is the blow that kills us, the kill is
+   * credited to them rather than to the pavement.
+   */
+  private takeNetHit(h: NetHit): void {
+    if (this.dead || !this.net.pvp) return;
+    const st = this.remotes.stateOf(h.shooter);
+    this.damagePlayer(h.damage, st ? st.x : this.px, st ? st.z : this.pz, true, h.shooter);
+    if ((h.flags & HIT_MELEE) === 0) this.audio.bodyHit();
+  }
+
+  private onNetKill(e: KillEvent, killer: number, victim: number): void {
+    if (victim === this.net.myId) return;                 // our own death already toasted
+    if (killer === this.net.myId) {
+      this.hitMarker = 0.35;
+      this.audio.hitMarker();
+      this.toast(`You killed ${e.victim}`);
+    }
+    this.pushNetHud();
+  }
+
+  private onMatchChange(m: MatchState, prev: MatchState): void {
+    if (m.state === MATCH_LIVE && prev.state !== MATCH_LIVE) {
+      // A match starts everyone fresh, wherever they happened to be standing.
+      this.wanted = 0;
+      this.peds.removeCops();
+      this.audio.sirenOff();
+      this.health = 100;
+      this.armour = 0;
+      if (this.dead) this.respawnInMatch();
+      this.toast('MATCH ON — first to ' + m.target);
+    } else if (m.state === MATCH_OVER && prev.state === MATCH_LIVE) {
+      const winner = m.scoreA >= m.target ? TEAM_A : TEAM_B;
+      this.toast(this.net.myTeam === winner ? 'YOUR TEAM WINS' : 'YOUR TEAM LOSES');
+    }
+    this.pushNetHud();
+  }
+
+  /** Hand our car back to the ambient set, if we had claimed one. */
+  private releaseCar(): void {
+    if (!this.claimedCar) return;
+    this.traffic?.setClaimed(this.claimedCar, false);
+    this.net.sendClaim(this.claimedCar, false);
+    this.claimedCar = 0;
+  }
+
   private pushNetHud(): void {
+    const m = this.net.match;
     setHud({
       netStatus: this.net.status,
       netRoom: this.net.roomCode,
       netError: this.net.error,
       netPeers: this.net.peerCount,
       netNames: [...this.net.peers.values()].map((p) => p.name),
+      netTeam: this.net.myTeam,
+      netHost: this.net.isHost,
+      netMode: m.mode,
+      netMatch: m.state,
+      netScoreA: m.scoreA,
+      netScoreB: m.scoreB,
+      netTarget: m.target,
+      netRoster: this.net.roster(),
+      netFeed: this.net.feed.slice(),
     });
   }
 
@@ -521,6 +640,9 @@ export class Game {
     // rebuild the dynamic collider list from last frame's vehicle positions
     this.phys.dyn.length = 0;
     for (const v of this.traffic.cars) this.phys.dyn.push(v.box);
+    // Cars other players are driving are solid too, so you can crash into a friend and
+    // shoot at the car they are sitting in rather than through it.
+    if (this.net.status !== 'offline') this.remotes.collisionBoxes(this.phys.dyn);
 
     if (this.settings.dayNight) {
       this.sky.setHour(9.5 + t / 90);   // a full day every 36 minutes
@@ -567,19 +689,36 @@ export class Game {
     // ── multiplayer: report our own state, draw everyone else's
     if (this.net.status !== 'offline') {
       const now = Date.now();
+      const v = this.vehicle;
       this.net.sendState(now, {
         x: this.px, y: this.py, z: this.pz,
-        yaw: this.vehicle ? this.vehicle.yaw : this.pyaw,
+        yaw: v ? v.yaw : this.pyaw,
         flags: packFlags({
           sprint: this.speed > WALK_SPEED + 0.4,
           aiming: this.aiming,
-          inVehicle: !!this.vehicle,
+          inVehicle: !!v,
           dead: this.dead,
           grounded: this.grounded,
         }),
         speed: this.speed,
         weapon: Math.max(0, WEAPON_ORDER.indexOf(this.weapon)),
+        team: this.net.myTeam,
+        health: Math.max(0, Math.round(this.health)),
+        // The car we are in travels with us, which is the whole fix for a driving player
+        // being invisible to everyone else.
+        vkind: v ? Math.max(0, VEH_KINDS.indexOf(v.kind)) : 0,
+        vcolour: v ? Math.max(0, CAR_COLOURS.indexOf(v.colour)) : 0,
       });
+
+      // Ambient traffic: exactly one client simulates it, everyone else replays it.
+      // Only while actually online — a socket that is still connecting, or has errored,
+      // has no host, and puppeting a host that does not exist freezes the whole street.
+      if (this.net.online) {
+        this.traffic.setPuppet(!this.net.isHost, MAX_SYNC_CARS);
+        if (this.net.isHost) this.net.sendTraffic(now, this.traffic.netCars());
+        else this.traffic.applyNetwork(this.net.traffic.sample(now), dt);
+      }
+
       this.remotes.update(this.net, dt, t, now, this.px, this.pz, this.preset.drawDistance * 0.75);
     }
 
@@ -735,6 +874,13 @@ export class Game {
     v.isPlayer = true;
     v.ai = null;
     this.traffic.release(v);
+    // Tell the room this car is ours: the host stops simulating and broadcasting it, and
+    // everyone else drops their copy, so nobody sees two of the taxi we just stole.
+    if (this.net.online && v.netId) {
+      this.claimedCar = v.netId;
+      this.traffic.setClaimed(v.netId, true);
+      this.net.sendClaim(v.netId, true);
+    }
     v.ctrl.handbrake = false;
     // seat the hero inside the body so they roll with the suspension
     this.hero.root.removeFromParent();
@@ -748,6 +894,7 @@ export class Game {
 
   private exitVehicle(): void {
     const v = this.vehicle!;
+    this.releaseCar();
     // Bailing out at speed is allowed — it just hurts. Blocking it instead made E look
     // broken whenever you were moving.
     const bail = Math.abs(v.speed) > 9;
@@ -910,7 +1057,10 @@ export class Game {
       const dy = this.camDir.y + (Math.random() - 0.5) * sp;
       const dz = this.camDir.z + (Math.random() - 0.5) * sp;
       const inv = 1 / Math.hypot(dx, dy, dz);
-      const hit = this.combat.raycast(ox, oy, oz, dx * inv, dy * inv, dz * inv, spec.range, this.peds.peds, null, null);
+      const hit = this.combat.raycast(
+        ox, oy, oz, dx * inv, dy * inv, dz * inv, spec.range,
+        this.peds.peds, null, null, this.remotes.hitTargets(),
+      );
       this.combat.tracer(this.tmp2.x, this.tmp2.y, this.tmp2.z, hit.x, hit.y, hit.z);
 
       if (hit.kind === 'ped' && hit.ped) {
@@ -923,6 +1073,13 @@ export class Game {
           killed = true;
           this.onPedKilled(hit.ped);
         }
+      } else if (hit.kind === 'player') {
+        hitAny = true;
+        // Report it and stop. Their client subtracts the health and decides if they die —
+        // see the note on Hit in protocol.ts for why that is the only place it can happen.
+        this.net.sendHit(hit.netId, spec.damage * (hit.head ? spec.headMult : 1), hit.head ? HIT_HEAD : 0);
+        this.combat.bloodBurst(hit.x, hit.y, hit.z, -dx * inv, 0.4, -dz * inv, hit.head ? 14 : 9);
+        this.audio.bodyHit();
       } else if (hit.kind === 'vehicle' && hit.veh) {
         hitAny = true;
         hit.veh.health -= spec.damage * 0.5;
@@ -938,7 +1095,9 @@ export class Game {
     this.rig.addRecoil(spec.recoilPitch, (Math.random() - 0.5) * spec.recoilYaw * 2, spec.shake);
     // gunfire in public is a crime, and everyone nearby knows it
     this.peds.panic(this.px, this.pz, 26, 7);
-    this.addWanted(killed ? 0 : 0.34);
+    // ...but not during a match. Being chased by the police for shooting the other team
+    // turns a deathmatch into a police chase, which is a different game.
+    if (!this.net.pvp) this.addWanted(killed ? 0 : 0.34);
   }
 
   private melee(t: number): void {
@@ -946,6 +1105,10 @@ export class Game {
     this.fireCd = 60 / spec.rpm;
     this.punchT = 0.4;
     this.audio.punch();
+    // A player in range beats a pedestrian: swinging at someone and connecting with the
+    // civilian behind them is the single most annoying thing melee can do.
+    if (this.net.pvp && this.meleePlayer(spec.range, spec.damage)) return;
+
     let best: Ped | null = null;
     let bd = spec.range * spec.range;
     for (const p of this.peds.peds) {
@@ -966,6 +1129,25 @@ export class Game {
     else this.addWanted(0.2);
     this.peds.panic(this.px, this.pz, 12, 5);
     void t;
+  }
+
+  /** Swing at the nearest enemy player in front of us. Returns true if we connected. */
+  private meleePlayer(range: number, damage: number): boolean {
+    let bestId = 0;
+    let bd = range * range;
+    for (const q of this.remotes.hitTargets()) {
+      if (q.friendly) continue;
+      const d = dist2(q.x, q.z, this.px, this.pz);
+      if (d > bd) continue;
+      if (Math.abs(wrapPi(Math.atan2(q.x - this.px, q.z - this.pz) - this.rig.yaw)) > 0.9) continue;
+      bd = d;
+      bestId = q.id;
+    }
+    if (!bestId) return false;
+    this.net.sendHit(bestId, damage, HIT_MELEE);
+    this.audio.bodyHit();
+    this.hitMarker = 0.2;
+    return true;
   }
 
   private onPedKilled(p: Ped): void {
@@ -1107,8 +1289,12 @@ export class Game {
     }
   }
 
-  private damagePlayer(amount: number, fromX: number, fromZ: number, shake: boolean): void {
+  private damagePlayer(amount: number, fromX: number, fromZ: number, shake: boolean, from = 0): void {
     if (this.dead) return;
+    if (from) {
+      this.lastAttacker = from;
+      this.lastAttackerT = this.elapsed;
+    }
     if (this.armour > 0) {
       const absorbed = Math.min(this.armour, amount * 0.7);
       this.armour -= absorbed;
@@ -1125,10 +1311,18 @@ export class Game {
     this.health = 0;
     this.dead = true;
     this.deadT = 0;
+    // Only we can report our own death, so the room counts it exactly once however many
+    // people were shooting. Credit expires so an old bullet cannot steal a road accident.
+    if (this.net.online) {
+      const fresh = this.elapsed - this.lastAttackerT < 6;
+      this.net.sendKill(fresh ? this.lastAttacker : 0, 0);
+    }
+    this.lastAttacker = 0;
     this.audio.death();
     this.audio.engineOff();
     if (this.vehicle) {
       const v = this.vehicle;
+      this.releaseCar();
       this.hero.root.removeFromParent();
       this.scene.add(this.hero.root);
       this.hero.root.position.set(v.x, v.y, v.z);
@@ -1169,6 +1363,7 @@ export class Game {
   }
 
   private respawn(): void {
+    if (this.net.pvp) return this.respawnInMatch();
     const cost = Math.round(this.money * 0.1);
     this.money = Math.max(0, this.money - cost);
     this.health = 100;
@@ -1184,6 +1379,44 @@ export class Game {
     this.hero.tilt.rotation.set(0, 0, 0);
     this.toast(`Patched up at the clinic — Rs.${cost}`);
     setHud({ phase: 'playing', health: 100, money: this.money, wanted: 0 });
+  }
+
+  /**
+   * Match respawn: no hospital bill, no wanted level, full health, and a spot away from
+   * whoever just killed you. Charging a player money for losing a gunfight — and dropping
+   * them back at the same clinic every time, where the winner is waiting — is what makes
+   * a deathmatch on a free-roam map unplayable.
+   */
+  private respawnInMatch(): void {
+    this.health = 100;
+    this.armour = 0;
+    this.wanted = 0;
+    this.dead = false;
+    this.deadT = 0;
+    this.lastAttacker = 0;
+    this.peds.removeCops();
+    this.audio.sirenOff();
+    const spot = this.matchSpawn();
+    this.teleport(spot.x, spot.z);
+    this.hero.tilt.rotation.set(0, 0, 0);
+    this.mag[this.weapon] = WEAPONS[this.weapon].mag;
+    setHud({ phase: 'playing', health: 100, wanted: 0 });
+  }
+
+  /** The plaza or park furthest from the nearest enemy, so you do not spawn under fire. */
+  private matchSpawn(): { x: number; z: number } {
+    const spots = this.city.pois.length ? this.city.pois : [this.city.playerStart];
+    let best = spots[0];
+    let bestScore = -1;
+    for (const s of spots) {
+      let near = Infinity;
+      for (const q of this.remotes.hitTargets()) {
+        if (q.friendly) continue;
+        near = Math.min(near, dist2(q.x, q.z, s.x, s.z));
+      }
+      if (near > bestScore) { bestScore = near; best = s; }
+    }
+    return best;
   }
 
   private teleport(x: number, z: number): void {
@@ -1394,6 +1627,28 @@ export class Game {
         }
       }
     }
+    if (this.net.pvp && this.vehicle) this.runOverPlayers(dt);
+  }
+
+  /**
+   * Running an opponent down. Reported the same way a bullet is, so it lands in the same
+   * kill feed and the same score — a car is just a very blunt weapon.
+   */
+  private runOverPlayers(dt: number): void {
+    const v = this.vehicle!;
+    const speed = Math.abs(v.speed);
+    if (speed < 4) return;
+    for (const q of this.remotes.hitTargets()) {
+      if (q.friendly) continue;
+      const dx = q.x - v.x, dz = q.z - v.z;
+      if (dx * dx + dz * dz > 9) continue;
+      const along = dx * Math.sin(v.yaw) + dz * Math.cos(v.yaw);
+      const side = dx * Math.cos(v.yaw) - dz * Math.sin(v.yaw);
+      if (Math.abs(along) > v.spec.halfL + 0.4 || Math.abs(side) > v.spec.halfW + 0.35) continue;
+      this.net.sendHit(q.id, speed * 5 * dt * 6, HIT_VEHICLE);
+      this.audio.bodyHit();
+      v.speed *= 0.94;
+    }
   }
 
   /* ── HUD + maps ───────────────────────────────────────────────────────── */
@@ -1457,6 +1712,14 @@ export class Game {
       if (dist2(v.x, v.z, this.px, this.pz) > 200 * 200) continue;
       this.ents.push({ x: v.x, z: v.z, kind: v.kind === 'police' ? 'copcar' : 'car' });
     }
+    // Other players last, so they paint over the traffic rather than under it.
+    this.remotes?.forEach((x, z, team) => {
+      this.ents.push({
+        x, z,
+        kind: this.net.myTeam === TEAM_NONE ? 'player'
+          : team === this.net.myTeam ? 'mate' : 'enemy',
+      });
+    });
     for (const s of this.city.shops) this.ents.push({ x: s.x, z: s.z, kind: 'shop' });
     for (const p of this.pickups) if (!p.taken) this.ents.push({ x: p.x, z: p.z, kind: 'pickup' });
     for (const it of this.items) if (!it.found) this.ents.push({ x: it.x, z: it.z, kind: 'objective' });

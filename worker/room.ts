@@ -1,8 +1,14 @@
 import { DurableObject } from 'cloudflare:workers';
 import {
-  C_HELLO, C_STATE, MAX_PLAYERS, Peer, PROTOCOL_VERSION, PlayerState,
-  REJECT_FULL, REJECT_VERSION, decodeHello, decodeState, encodeJoin, encodeLeave,
-  encodeReject, encodeSnapshot, encodeWelcome, messageId,
+  C_CLAIM, C_HELLO, C_HIT, C_KILL, C_MATCH, C_STATE, C_TEAM, C_TRAFFIC,
+  MATCH_LIVE, MATCH_LOBBY, MATCH_OVER, MATCH_RESET, MATCH_START,
+  MAX_PLAYERS, MODE_FREEROAM, MODE_TDM, Peer, PROTOCOL_VERSION, PlayerState,
+  REJECT_FULL, REJECT_VERSION, TDM_TARGET, TEAM_A, TEAM_B, TEAM_NONE,
+  decodeClaim, decodeHello, decodeHit, decodeKill, decodeMatch, decodeState, decodeTeam,
+  decodeTraffic,
+  encodeClaimOut, encodeHitOut, encodeHost, encodeJoin, encodeKillOut, encodeLeave,
+  encodeMatchOut,
+  encodeReject, encodeSnapshot, encodeTeamOut, encodeTrafficOut, encodeWelcome, messageId,
 } from '../game/protocol';
 import type { Env } from './env';
 
@@ -16,18 +22,27 @@ import type { Env } from './env';
  * lets an object sleep while its sockets stay open. A setInterval game loop would pin the
  * object awake for the entire life of the room and throw that away.
  *
- * So for free-roam we relay: a client reports its own state, we stamp it with the sender's
- * id and fan it out. The object wakes only to forward a frame, then sleeps. Latency is as
- * low as it can be, and an idle lobby costs nothing.
+ * So we relay: a client reports its own state, we stamp it with the sender's id and fan it
+ * out. The object wakes only to forward a frame, then sleeps. Latency is as low as it can
+ * be, and an idle lobby costs nothing.
  *
- * The trade-off is honest: clients are trusted about their own position. Among friends that
- * is fine. It is NOT fine for competitive shooting, so milestone 3 (hit registration) adds
- * an authoritative tick — at which point that mode pays for the duration it uses.
+ * ── What the server *does* decide ──
+ *
+ * Three things, because leaving any of them to a client produces disagreement rather than
+ * cheating, and all three are event-driven so none of them costs a tick loop:
+ *
+ *   · **team assignment** — clients that pick their own side end up 5v1
+ *   · **the score** — two clients counting kills independently drift apart immediately
+ *   · **who is traffic host** — exactly one client may own the ambient cars
+ *
+ * Positions and damage stay client-reported. That is an honest trade for a game you enter
+ * with a room code you sent to friends, and it is stated in docs/multiplayer.md.
  */
 
 interface Attach {
   id: number;
   name: string;
+  team: number;
 }
 
 /** Per-connection state that does not need to survive hibernation. */
@@ -37,21 +52,41 @@ interface Live {
   windowStart: number;
 }
 
-const RATE_LIMIT_MSGS = 80;      // per second, per socket — generous vs the 20 Hz we send
+/** Match state, persisted because hibernation may evict the instance mid-match. */
+interface Match {
+  mode: number;
+  state: number;
+  scoreA: number;
+  scoreB: number;
+  target: number;
+}
+
+const RATE_LIMIT_MSGS = 140;     // per second, per socket — 20 Hz state + 10 Hz traffic + slack
 const NAME_MAX = 24;
 /** How often we tell the lobby we are still alive. Must be under the lobby's stale cutoff. */
 const HEARTBEAT_MS = 20_000;
+/** A single shot can never legitimately take more than this. Caps a lying client's reach. */
+const MAX_HIT_DAMAGE = 120;
 
 export class GameRoom extends DurableObject<Env> {
   private live = new WeakMap<WebSocket, Live>();
   private tick = 0;
   private mode = 'freeroam';
   private isPublic = false;
+  private hostId = 0;
+  private match: Match = { mode: MODE_FREEROAM, state: MATCH_LOBBY, scoreA: 0, scoreB: 0, target: TDM_TARGET };
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     // Heartbeats are answered by the runtime without waking us up.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
+    // Sockets outlive the instance, so a match must be reloaded before we serve any frame.
+    ctx.blockConcurrencyWhile(async () => {
+      const saved = await ctx.storage.get<Match>('match');
+      if (saved) this.match = saved;
+      const host = await ctx.storage.get<number>('host');
+      if (typeof host === 'number') this.hostId = host;
+    });
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -64,6 +99,11 @@ export class GameRoom extends DurableObject<Env> {
     if (this.ctx.getWebSockets().length === 0) {
       this.mode = (url.searchParams.get('mode') ?? 'freeroam').slice(0, 16);
       this.isPublic = url.searchParams.get('public') === '1';
+      this.match = {
+        mode: this.mode === 'tdm' ? MODE_TDM : MODE_FREEROAM,
+        state: MATCH_LOBBY, scoreA: 0, scoreB: 0, target: TDM_TARGET,
+      };
+      void this.ctx.storage.put('match', this.match);
     }
 
     const pair = new WebSocketPair();
@@ -90,6 +130,12 @@ export class GameRoom extends DurableObject<Env> {
     switch (messageId(raw)) {
       case C_HELLO: return this.onHello(ws, raw);
       case C_STATE: return this.onState(ws, raw);
+      case C_HIT: return this.onHit(ws, raw);
+      case C_KILL: return this.onKill(ws, raw);
+      case C_TEAM: return this.onTeam(ws, raw);
+      case C_MATCH: return this.onMatch(ws, raw);
+      case C_TRAFFIC: return this.onTraffic(ws, raw);
+      case C_CLAIM: return this.onClaim(ws, raw);
       default: return;                                    // unknown frame: ignore
     }
   }
@@ -105,9 +151,13 @@ export class GameRoom extends DurableObject<Env> {
     // getWebSockets() still includes the closing socket here, so 1 means "last one out".
     if (this.ctx.getWebSockets().length <= 1) {
       void this.ctx.storage.deleteAlarm();
+      void this.ctx.storage.delete(['match', 'host']);
       const code = this.ctx.id.name;
       if (code) void this.env.LOBBY.getByName('global').drop(code);
     } else {
+      // The host may have just left with the ambient traffic. Hand it to someone else
+      // before anyone notices the cars have stopped.
+      this.electHost(ws);
       void this.heartbeat();
     }
   }
@@ -125,7 +175,7 @@ export class GameRoom extends DurableObject<Env> {
     try {
       await this.env.LOBBY.getByName('global').announce({
         code,
-        mode: this.mode,
+        mode: this.match.mode === MODE_TDM ? 'tdm' : 'freeroam',
         players: this.ctx.getWebSockets().length,
         max: MAX_PLAYERS,
         isPublic: this.isPublic,
@@ -155,7 +205,7 @@ export class GameRoom extends DurableObject<Env> {
       const a = this.attach(other);
       if (!a || other === ws) continue;
       taken.add(a.id);
-      peers.push({ id: a.id, name: a.name });
+      peers.push({ id: a.id, name: a.name, team: a.team });
     }
     if (peers.length >= MAX_PLAYERS) {
       ws.send(encodeReject(REJECT_FULL));
@@ -166,11 +216,21 @@ export class GameRoom extends DurableObject<Env> {
     let id = 1;
     while (taken.has(id) && id < 255) id++;
     const name = cleanName(hello.name, id);
+    // Free-roam has no sides at all, so a joiner is team 0 and nobody can shoot them.
+    // In a match they land on whichever side is short — never their own choice, or the
+    // first four people in all pick the same team and there is no game.
+    const team = this.match.mode === MODE_FREEROAM ? TEAM_NONE : this.thinnerTeam(peers);
     // Attachments survive hibernation, so identity outlives a sleeping object.
-    ws.serializeAttachment({ id, name } satisfies Attach);
+    ws.serializeAttachment({ id, name, team } satisfies Attach);
 
-    ws.send(encodeWelcome(id, peers));
-    const joined = encodeJoin({ id, name });
+    if (!this.hostId) {
+      this.hostId = id;
+      void this.ctx.storage.put('host', id);
+    }
+
+    ws.send(encodeWelcome(id, team, this.hostId, peers));
+    ws.send(encodeMatchOut(this.match));
+    const joined = encodeJoin({ id, name, team });
     for (const other of this.ctx.getWebSockets()) {
       if (other !== ws) this.trySend(other, joined);
     }
@@ -188,11 +248,207 @@ export class GameRoom extends DurableObject<Env> {
     if (l.seq !== 0 && (delta === 0 || delta > 0x8000)) return;
     l.seq = msg.seq;
 
-    const state: PlayerState = { ...msg.state, id: me.id };
+    // The team is ours to state, not the client's — otherwise anyone can turn friendly
+    // fire on by claiming to be on the other side.
+    const state: PlayerState = { ...msg.state, id: me.id, team: me.team };
     const frame = encodeSnapshot(++this.tick, [state]);
     for (const other of this.ctx.getWebSockets()) {
       if (other !== ws) this.trySend(other, frame);
     }
+  }
+
+  /**
+   * Forward a hit to its victim only. The victim owns its own health, so nobody else needs
+   * the frame — and the shooter already drew its own hit marker locally, at zero latency.
+   */
+  private onHit(ws: WebSocket, raw: ArrayBuffer): void {
+    const me = this.attach(ws);
+    if (!me) return;
+    const hit = decodeHit(raw);
+    if (!hit || hit.target === me.id) return;
+    if (this.match.state !== MATCH_LIVE) return;          // no damage outside a live match
+
+    const victim = this.socketOf(hit.target);
+    if (!victim) return;
+    const them = this.attach(victim);
+    if (!them) return;
+    // Friendly fire is off, and it is off *here* so a modified client cannot turn it on.
+    if (me.team !== TEAM_NONE && me.team === them.team) return;
+
+    this.trySend(victim, encodeHitOut({
+      shooter: me.id,
+      target: hit.target,
+      damage: Math.min(hit.damage, MAX_HIT_DAMAGE),
+      flags: hit.flags,
+    }));
+  }
+
+  /**
+   * Only the victim reports a death, so a kill is counted exactly once no matter how many
+   * people were shooting. The score is ours because two clients tallying independently
+   * disagree the first time a frame is dropped.
+   */
+  private onKill(ws: WebSocket, raw: ArrayBuffer): void {
+    const me = this.attach(ws);
+    if (!me) return;
+    const msg = decodeKill(raw);
+    if (!msg) return;
+
+    const killerWs = msg.killer ? this.socketOf(msg.killer) : null;
+    const killer = killerWs ? this.attach(killerWs) : null;
+
+    this.broadcast(encodeKillOut(killer ? killer.id : 0, me.id, msg.flags));
+
+    // No point for suicide, for a team kill, or for dying to the city itself.
+    const scores = this.match.state === MATCH_LIVE
+      && killer !== null
+      && killer.id !== me.id
+      && killer.team !== me.team
+      && killer.team !== TEAM_NONE;
+    if (!scores || !killer) return;
+
+    if (killer.team === TEAM_A) this.match.scoreA++;
+    else this.match.scoreB++;
+    if (this.match.scoreA >= this.match.target || this.match.scoreB >= this.match.target) {
+      this.match.state = MATCH_OVER;
+    }
+    this.saveMatch();
+    this.broadcast(encodeMatchOut(this.match));
+  }
+
+  /** A side switch is allowed only while it does not make the match lopsided. */
+  private onTeam(ws: WebSocket, raw: ArrayBuffer): void {
+    const me = this.attach(ws);
+    if (!me) return;
+    const want = decodeTeam(raw);
+    if (want === null || want === me.team) return;
+    if (this.match.mode === MODE_FREEROAM || want === TEAM_NONE) return;
+
+    let a = 0, b = 0;
+    for (const other of this.ctx.getWebSockets()) {
+      if (other === ws) continue;
+      const t = this.attach(other)?.team;
+      if (t === TEAM_A) a++;
+      else if (t === TEAM_B) b++;
+    }
+    // Refuse anything that would leave one side two or more players larger.
+    const after = want === TEAM_A ? a + 1 - b : b + 1 - a;
+    if (after > 1) {
+      this.trySend(ws, encodeTeamOut(me.id, me.team));    // tell them it did not take
+      return;
+    }
+
+    ws.serializeAttachment({ ...me, team: want } satisfies Attach);
+    this.broadcast(encodeTeamOut(me.id, want));
+  }
+
+  /** Start or reset a match. Host only — anyone else is ignored, not punished. */
+  private onMatch(ws: WebSocket, raw: ArrayBuffer): void {
+    const me = this.attach(ws);
+    if (!me || me.id !== this.hostId) return;
+    const msg = decodeMatch(raw);
+    if (!msg) return;
+
+    if (msg.action === MATCH_START) {
+      const mode = msg.mode === MODE_TDM ? MODE_TDM : MODE_FREEROAM;
+      this.match = {
+        mode,
+        state: mode === MODE_FREEROAM ? MATCH_LOBBY : MATCH_LIVE,
+        scoreA: 0, scoreB: 0, target: TDM_TARGET,
+      };
+      this.assignTeams(mode === MODE_FREEROAM ? null : undefined);
+    } else if (msg.action === MATCH_RESET) {
+      this.match = {
+        mode: MODE_FREEROAM, state: MATCH_LOBBY, scoreA: 0, scoreB: 0, target: TDM_TARGET,
+      };
+      this.assignTeams(null);
+    } else {
+      return;
+    }
+    this.saveMatch();
+    this.broadcast(encodeMatchOut(this.match));
+  }
+
+  /**
+   * Ambient traffic, accepted from the host and nobody else. Two clients broadcasting cars
+   * would fight over every position, so the check is a hard drop rather than a merge.
+   */
+  private onTraffic(ws: WebSocket, raw: ArrayBuffer): void {
+    const me = this.attach(ws);
+    if (!me || me.id !== this.hostId) return;
+    const cars = decodeTraffic(raw);
+    if (!cars) return;
+    const frame = encodeTrafficOut(cars);
+    for (const other of this.ctx.getWebSockets()) {
+      if (other !== ws) this.trySend(other, frame);
+    }
+  }
+
+  /**
+   * Relay a car claim untouched. The host is the only client that acts on it (it stops
+   * simulating the car), but everyone needs it so they stop drawing their own copy.
+   */
+  private onClaim(ws: WebSocket, raw: ArrayBuffer): void {
+    const me = this.attach(ws);
+    if (!me) return;
+    const c = decodeClaim(raw);
+    if (!c) return;
+    const frame = encodeClaimOut(me.id, c.car, c.taken);
+    for (const other of this.ctx.getWebSockets()) {
+      if (other !== ws) this.trySend(other, frame);
+    }
+  }
+
+  /* ── teams, host ────────────────────────────────────────────────────────── */
+
+  /**
+   * Put everyone on a side, alternating so the split is even and stable. Pass null to
+   * clear teams (back to free-roam). Broadcasts one S_TEAM per player — a handful of
+   * 3-byte frames, once per match, so it is not worth a bulk message.
+   */
+  private assignTeams(clear?: null): void {
+    const sockets = this.ctx.getWebSockets()
+      .map((ws) => ({ ws, a: this.attach(ws) }))
+      .filter((e): e is { ws: WebSocket; a: Attach } => e.a !== null)
+      .sort((p, q) => p.a.id - q.a.id);
+
+    sockets.forEach((e, i) => {
+      const team = clear === null ? TEAM_NONE : (i % 2 === 0 ? TEAM_A : TEAM_B);
+      e.ws.serializeAttachment({ ...e.a, team } satisfies Attach);
+      this.broadcast(encodeTeamOut(e.a.id, team));
+    });
+  }
+
+  private thinnerTeam(peers: Peer[]): number {
+    let a = 0, b = 0;
+    for (const p of peers) {
+      if (p.team === TEAM_A) a++;
+      else if (p.team === TEAM_B) b++;
+    }
+    return a <= b ? TEAM_A : TEAM_B;
+  }
+
+  /**
+   * Lowest connected id owns the traffic. `leaving` is excluded because getWebSockets()
+   * still reports a socket that is in the middle of closing.
+   */
+  private electHost(leaving: WebSocket | null): void {
+    let best = 0;
+    for (const ws of this.ctx.getWebSockets()) {
+      if (ws === leaving) continue;
+      const a = this.attach(ws);
+      if (a && (best === 0 || a.id < best)) best = a.id;
+    }
+    if (best === this.hostId) return;
+    this.hostId = best;
+    void this.ctx.storage.put('host', best);
+    for (const ws of this.ctx.getWebSockets()) {
+      if (ws !== leaving) this.trySend(ws, encodeHost(best));
+    }
+  }
+
+  private saveMatch(): void {
+    void this.ctx.storage.put('match', this.match);
   }
 
   /* ── plumbing ───────────────────────────────────────────────────────────── */
@@ -200,10 +456,23 @@ export class GameRoom extends DurableObject<Env> {
   private attach(ws: WebSocket): Attach | null {
     try {
       const a = ws.deserializeAttachment() as Attach | null;
-      return a && typeof a.id === 'number' ? a : null;
+      if (!a || typeof a.id !== 'number') return null;
+      // Sockets that greeted us before teams existed decode without one.
+      return { id: a.id, name: a.name, team: typeof a.team === 'number' ? a.team : TEAM_NONE };
     } catch {
       return null;
     }
+  }
+
+  private socketOf(id: number): WebSocket | null {
+    for (const ws of this.ctx.getWebSockets()) {
+      if (this.attach(ws)?.id === id) return ws;
+    }
+    return null;
+  }
+
+  private broadcast(data: ArrayBuffer): void {
+    for (const ws of this.ctx.getWebSockets()) this.trySend(ws, data);
   }
 
   private liveOf(ws: WebSocket): Live {
@@ -243,7 +512,7 @@ export class GameRoom extends DurableObject<Env> {
 /** Never trust a client-supplied name: strip controls, cap length, always non-empty. */
 function cleanName(raw: string, id: number): string {
   const clean = Array.from(raw)
-    .filter((ch) => ch >= ' ' && ch !== '')
+    .filter((ch) => ch >= ' ' && ch !== '')
     .join('')
     .replace(/\s+/g, ' ')
     .trim()

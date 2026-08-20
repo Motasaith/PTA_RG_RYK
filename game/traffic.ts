@@ -1,9 +1,10 @@
 import * as THREE from 'three';
 import { City, laneOffsetFor, LEFT_HAND_TRAFFIC, RoadNode } from './layout';
 import { clamp, dist2, mulberry32, pick, Rng, wrapPi } from './mathx';
+import { CarState, MAX_SYNC_CARS, TF_BRAKE, TF_PARKED, TF_SIREN, VEH_KINDS } from './protocol';
 import { Physics } from './physics';
 import {
-  CAR_COLOURS, createVehicle, placeVehicle, stepVehicle, updateVehicleBox, updateSiren, Vehicle, VehKind,
+  createVehicle, placeVehicle, poseNetVehicle, stepVehicle, updateSiren, updateVehicleBox, CAR_COLOURS, Vehicle, VehKind,
 } from './vehicle';
 
 interface Lane {
@@ -12,8 +13,24 @@ interface Lane {
   next: RoadNode;
   /** metres travelled along the current edge */
   s: number;
+  /**
+   * Seconds this car has failed to get anywhere.
+   *
+   * Measured from actual displacement rather than from speed. A car wedged against a wall
+   * still reads a speed: the throttle pushes it up, the collision response knocks it back,
+   * and it oscillates across any speed threshold forever while never moving a metre. That
+   * is exactly how cars used to end up parked in the road for a whole session.
+   */
   stuck: number;
+  /** where the car was at the last progress check, and how long ago that was */
+  cx: number;
+  cz: number;
+  ct: number;
 }
+
+/** How often to check whether a car has actually got anywhere, and how far counts. */
+const PROGRESS_EVERY = 3;
+const PROGRESS_MIN = 2;
 
 // Weighted by how common each is on the street: mostly ordinary cars, the odd fast one,
 // and a hypercar you will occasionally find parked and be very pleased about.
@@ -31,7 +48,25 @@ export class Traffic {
   cars: Vehicle[] = [];
   private lanes = new Map<Vehicle, Lane>();
   private rng: Rng = mulberry32(90210);
+  /**
+   * Parked cars draw from their own stream. Sharing one generator with the moving traffic
+   * meant the parked layout depended on how many moving cars the quality preset asked for,
+   * so two players on different settings parked different cars in different driveways —
+   * one of the two reasons the world never matched online.
+   */
+  private parkRng: Rng = mulberry32(60613);
   private tmp = new THREE.Vector3();
+
+  /**
+   * Puppet mode: this client does not own the ambient traffic, so it stops simulating the
+   * moving cars and places them where the host says instead. Parked cars stay local —
+   * they do not move, and both clients place them from the same seed.
+   */
+  private puppet = false;
+  private remote = new Map<number, Vehicle>();
+  /** Cars a player has taken the wheel of. The host stops simulating and sending these. */
+  private claimed = new Set<number>();
+  private nextNetId = 1;
 
   constructor(
     private scene: THREE.Scene,
@@ -88,8 +123,26 @@ export class Traffic {
       this.lanePoint(from, to, s, this.tmp);
       placeVehicle(v, this.tmp.x, this.tmp.z, Math.atan2(to.x - from.x, to.z - from.z));
       v.ai = { from: 0, to: 0, t: 0, wait: 0, chase: false };
-      this.lanes.set(v, { from, to, next: this.chooseNext(from, to), s, stuck: 0 });
+      v.netId = this.nextNetId++;
+      this.lanes.set(v, { from, to, next: this.chooseNext(from, to), s, stuck: 0, cx: 0, cz: 0, ct: 0 });
       this.cars.push(v);
+    }
+  }
+
+  /**
+   * Grow or shrink the moving traffic to `target` cars.
+   *
+   * Going online calls this, because the ambient set has to be the same size for everyone
+   * and the quality preset is a per-machine choice. It is capped at MAX_SYNC_CARS: a
+   * shared street is worth more than the extra cars a fast machine could have drawn.
+   */
+  resizeLanes(target: number): void {
+    const want = Math.min(target, MAX_SYNC_CARS);
+    const moving = [...this.lanes.keys()].filter((v) => !v.isPlayer);
+    if (moving.length > want) {
+      for (const v of moving.slice(want)) this.remove(v);
+    } else if (moving.length < want) {
+      this.spawn(want - moving.length);
     }
   }
 
@@ -102,9 +155,9 @@ export class Traffic {
     const out: Vehicle[] = [];
     const spots = this.city.parkSpots.slice();
     for (let i = 0; i < count && spots.length; i++) {
-      const idx = Math.floor(this.rng() * spots.length);
+      const idx = Math.floor(this.parkRng() * spots.length);
       const spot = spots.splice(idx, 1)[0];
-      const v = createVehicle(pick(this.rng, CIVILIAN), pick(this.rng, CAR_COLOURS));
+      const v = createVehicle(pick(this.parkRng, CIVILIAN), pick(this.parkRng, CAR_COLOURS));
       this.scene.add(v.group);
       placeVehicle(v, spot.x, spot.z, spot.yaw);
       updateVehicleBox(v);
@@ -133,9 +186,103 @@ export class Traffic {
 
   remove(v: Vehicle): void {
     this.lanes.delete(v);
+    if (v.netId) this.remote.delete(v.netId);
     const i = this.cars.indexOf(v);
     if (i >= 0) this.cars.splice(i, 1);
     v.group.removeFromParent();
+  }
+
+  /* ── network ────────────────────────────────────────────────────────────── */
+
+  /**
+   * Switch between owning the ambient traffic and puppeting the host's.
+   *
+   * Becoming a puppet throws the local moving cars away rather than trying to match them
+   * up with the host's: they are a different simulation with different ids, and any
+   * reconciliation would be guesswork that looks like cars teleporting.
+   */
+  setPuppet(on: boolean, laneTarget = MAX_SYNC_CARS): void {
+    if (on === this.puppet) return;
+    this.puppet = on;
+    if (on) {
+      for (const v of [...this.lanes.keys()]) if (!v.isPlayer) this.remove(v);
+      this.lanes.clear();
+    } else {
+      for (const v of [...this.remote.values()]) if (!v.isPlayer) this.remove(v);
+      this.remote.clear();
+      this.claimed.clear();
+      this.spawn(laneTarget);
+    }
+  }
+
+  get isPuppet(): boolean {
+    return this.puppet;
+  }
+
+  /** The moving cars the host broadcasts. Player-driven and claimed cars are left out. */
+  netCars(): CarState[] {
+    const out: CarState[] = [];
+    for (const v of this.lanes.keys()) {
+      if (v.isPlayer || this.claimed.has(v.netId)) continue;
+      out.push({
+        id: v.netId,
+        kind: Math.max(0, VEH_KINDS.indexOf(v.kind)),
+        colour: colourIndex(v),
+        x: v.x, y: v.y, z: v.z, yaw: v.yaw,
+        flags: (v.siren ? TF_SIREN : 0) | (v.ctrl.brake > 0.05 ? TF_BRAKE : 0),
+      });
+      if (out.length >= MAX_SYNC_CARS) break;
+    }
+    return out;
+  }
+
+  /** Reconcile our puppet cars against one interpolated frame from the host. */
+  applyNetwork(cars: CarState[], dt: number): void {
+    if (!this.puppet) return;
+    const seen = new Set<number>();
+    for (const c of cars) {
+      if (this.claimed.has(c.id)) continue;
+      seen.add(c.id);
+      let v = this.remote.get(c.id);
+      if (!v) {
+        v = createVehicle(VEH_KINDS[c.kind] as VehKind, CAR_COLOURS[c.colour % CAR_COLOURS.length]);
+        v.netId = c.id;
+        placeVehicle(v, c.x, c.z, c.yaw);
+        v.y = c.y;
+        this.scene.add(v.group);
+        this.remote.set(c.id, v);
+        this.cars.push(v);
+      }
+      if (v.isPlayer) continue;                       // we took the wheel; we drive it now
+      v.siren = (c.flags & TF_SIREN) !== 0;
+      poseNetVehicle(v, c.x, c.y, c.z, c.yaw, dt);
+    }
+    // Anything the host stopped sending has been recycled or claimed — drop it.
+    for (const [id, v] of [...this.remote]) {
+      if (!seen.has(id) && !v.isPlayer) this.remove(v);
+    }
+  }
+
+  /**
+   * Mark a car as driven by a player. On the host that stops it being simulated and sent;
+   * on a puppet it stops the incoming frames from dragging it out from under its driver.
+   */
+  setClaimed(netId: number, taken: boolean): void {
+    if (!netId) return;
+    if (taken) {
+      this.claimed.add(netId);
+      const v = this.remote.get(netId) ?? this.byNetId(netId);
+      // On a puppet the claimed car is drawn from its driver's player state instead, so
+      // our copy has to go or there are two of it.
+      if (v && !v.isPlayer) this.remove(v);
+    } else {
+      this.claimed.delete(netId);
+    }
+  }
+
+  private byNetId(netId: number): Vehicle | null {
+    for (const v of this.cars) if (v.netId === netId) return v;
+    return null;
   }
 
   update(
@@ -147,6 +294,9 @@ export class Traffic {
     for (const v of this.cars) {
       updateSiren(v, t);
       if (v.isPlayer) continue;
+      // A puppet's ambient cars are posed by applyNetwork; stepping them as well would
+      // have physics and the network pulling the same car two ways every frame.
+      if (this.puppet && this.remote.has(v.netId)) continue;
 
       const lane = this.lanes.get(v);
       if (v.ai?.chase && chase) {
@@ -207,11 +357,16 @@ export class Traffic {
       if (lane.s < 0) lane.s = 0;
     }
 
-    // How long have we been stationary? Counted regardless of *why*, otherwise a car that
-    // yields to a queue never registers as stuck and the whole junction deadlocks.
-    if (Math.abs(v.speed) < 0.35) lane.stuck += dt;
-    else lane.stuck = 0;
-    const jammed = lane.stuck > 5;
+    // Progress, not speed: see the note on Lane.stuck. Counted regardless of *why* we are
+    // not moving, otherwise a car that yields to a queue never registers as stuck and the
+    // whole junction deadlocks.
+    lane.ct += dt;
+    if (lane.ct >= PROGRESS_EVERY) {
+      const moved = Math.hypot(v.x - lane.cx, v.z - lane.cz);
+      lane.stuck = moved < PROGRESS_MIN ? lane.stuck + lane.ct : 0;
+      lane.cx = v.x; lane.cz = v.z; lane.ct = 0;
+    }
+    const jammed = lane.stuck >= 6;
 
     // speed target: slow for corners, stop for obstacles
     let want = 13.5 - Math.abs(err) * 7;
@@ -230,8 +385,9 @@ export class Traffic {
     v.ctrl.handbrake = false;
 
     // still wedged after twelve seconds → move it somewhere useful
-    if (lane.stuck > 12) {
+    if (lane.stuck >= 12) {
       lane.stuck = 0;
+      lane.ct = 0;
       this.recycle(v, lane, px, pz);
     }
   }
@@ -259,25 +415,62 @@ export class Traffic {
    * Put a car back into the flow somewhere the player will actually see it: out of the
    * current view but close enough that the streets never look deserted.
    */
+  /**
+   * Put a wedged or far-away car back into the flow.
+   *
+   * The 55–190 m band keeps a car from popping into view or being respawned somewhere
+   * nobody will ever see it. But the band is a *preference*, not a requirement: the world
+   * grew a housing scheme to the south, and standing in it leaves the scheme nodes inside
+   * 55 m and the city nodes beyond 190 m — a donut with almost nothing in it. This used to
+   * fail all forty tries and return silently, leaving the car frozen in the road for the
+   * rest of the session. Online that frozen car is on everyone's screen, because the host
+   * broadcasts it.
+   *
+   * So we keep the best near-miss and use it if the band never hits. A car reappearing a
+   * little closer or further than ideal is always better than a car that never moves again.
+   */
   private recycle(v: Vehicle, lane: Lane, px: number, pz: number): void {
     const n = this.city.nodes;
+    let bestFrom: RoadNode | null = null, bestTo: RoadNode | null = null, bestS = 0;
+    let bestMiss = Infinity;
+
     for (let i = 0; i < 40; i++) {
       const from = pick(this.rng, n);
       if (!from.nb.length) continue;
       const to = pick(this.rng, from.nb);
       const s = this.rng() * this.edgeLenRaw(from, to);
       this.lanePoint(from, to, s, this.tmp);
-      const d2 = dist2(this.tmp.x, this.tmp.z, px, pz);
-      if (d2 < 55 * 55 || d2 > 190 * 190) continue;
-      lane.from = from; lane.to = to; lane.next = this.chooseNext(from, to); lane.s = s;
-      placeVehicle(v, this.tmp.x, this.tmp.z, Math.atan2(to.x - from.x, to.z - from.z));
-      v.health = 100;
-      return;
+      const d = Math.sqrt(dist2(this.tmp.x, this.tmp.z, px, pz));
+      if (d >= 55 && d <= 190) {
+        this.place(v, lane, from, to, s);
+        return;
+      }
+      // how far outside the band this candidate is, so the fallback is the closest fit
+      const miss = d < 55 ? 55 - d : d - 190;
+      if (miss < bestMiss) {
+        bestMiss = miss;
+        bestFrom = from; bestTo = to; bestS = s;
+      }
     }
+    if (bestFrom && bestTo) this.place(v, lane, bestFrom, bestTo, bestS);
   }
 
-  /** Traffic streaming: pull far-away cars back towards the player. */
+  private place(v: Vehicle, lane: Lane, from: RoadNode, to: RoadNode, s: number): void {
+    this.lanePoint(from, to, s, this.tmp);
+    lane.from = from; lane.to = to; lane.next = this.chooseNext(from, to); lane.s = s;
+    placeVehicle(v, this.tmp.x, this.tmp.z, Math.atan2(to.x - from.x, to.z - from.z));
+    lane.stuck = 0; lane.ct = 0; lane.cx = this.tmp.x; lane.cz = this.tmp.z;
+    v.health = 100;
+  }
+
+  /**
+   * Traffic streaming: pull far-away cars back towards the player.
+   *
+   * A puppet must never do this — the cars belong to the host, and recycling them locally
+   * would teleport a car that everyone else can see driving perfectly normally.
+   */
   streamTo(px: number, pz: number, keepWithin = 230): void {
+    if (this.puppet) return;
     for (const [v, lane] of this.lanes) {
       if (v.isPlayer) continue;
       if (dist2(v.x, v.z, px, pz) <= keepWithin * keepWithin) continue;
@@ -299,5 +492,17 @@ export class Traffic {
     for (const v of this.cars) v.group.removeFromParent();
     this.cars.length = 0;
     this.lanes.clear();
+    this.remote.clear();
+    this.claimed.clear();
   }
+}
+
+/**
+ * Recover a car's palette index for the wire. The body colour is baked into the material
+ * at build time, so we compare against the palette rather than store a field nothing else
+ * would ever read.
+ */
+function colourIndex(v: Vehicle): number {
+  const i = CAR_COLOURS.indexOf(v.colour);
+  return i < 0 ? 0 : i;
 }

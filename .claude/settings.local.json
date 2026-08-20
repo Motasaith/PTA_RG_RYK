@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm -rf migrations)",
+      "Bash(cat)",
+      "Bash(python3 -)",
+      "Bash(npx tsc *)",
+      "Bash(npm run *)",
+      "Bash(rm -f .newsec.md)",
+      "Bash(cd /d/try/PTA_Game *)",
+      "Bash(node scripts/smoke.mjs)",
+      "Bash(node probe.mjs)",
+      "Bash(rm -f probe.mjs)"
+    ],
+    "additionalDirectories": [
+      "d:\\try\\PTA_Game",
+      "D:\\try\\PTA_Game",
+      "d:\\try\\PTA_Game\\components",
+      "D:\\try\\PTA_Game\\components"
+    ]
+  }
+}

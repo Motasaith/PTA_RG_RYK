@@ -4,7 +4,7 @@ import { KIND, Physics } from './physics';
 import { Ped } from './peds';
 import { Vehicle } from './vehicle';
 
-export type HitKind = 'none' | 'world' | 'ground' | 'ped' | 'vehicle';
+export type HitKind = 'none' | 'world' | 'ground' | 'ped' | 'vehicle' | 'player';
 
 export interface Hit {
   kind: HitKind;
@@ -18,6 +18,24 @@ export interface Hit {
   ped: Ped | null;
   veh: Vehicle | null;
   head: boolean;
+  /** network id of the player hit, 0 for anything else */
+  netId: number;
+}
+
+/**
+ * A remote player as a bullet target: three spheres in the same places as a ped's, which
+ * is what makes shooting a friend feel identical to shooting a pedestrian.
+ *
+ * Deliberately a plain struct rather than the RemotePlayers object — combat has no business
+ * knowing about three.js rigs, and the interpolated position is the one that matters anyway.
+ */
+export interface NetTarget {
+  id: number;
+  x: number;
+  y: number;
+  z: number;
+  /** true for someone we must not be able to shoot: a teammate, or a corpse */
+  friendly: boolean;
 }
 
 function raySphere(
@@ -157,8 +175,12 @@ export class Combat {
     ox: number, oy: number, oz: number,
     dx: number, dy: number, dz: number,
     maxT: number, peds: Ped[], skipPed: Ped | null, skipVeh: Vehicle | null,
+    players: NetTarget[] = [],
   ): Hit {
-    const hit: Hit = { kind: 'none', x: 0, y: 0, z: 0, nx: 0, ny: 1, nz: 0, dist: maxT, ped: null, veh: null, head: false };
+    const hit: Hit = {
+      kind: 'none', x: 0, y: 0, z: 0, nx: 0, ny: 1, nz: 0, dist: maxT,
+      ped: null, veh: null, head: false, netId: 0,
+    };
     let bestT = maxT;
 
     const w = this.phys.raycast(ox, oy, oz, dx, dy, dz, maxT, true, 0, skipVeh ?? undefined);
@@ -203,6 +225,35 @@ export class Combat {
         hit.kind = 'ped';
         hit.ped = p;
         hit.veh = null;
+        hit.head = head;
+        hit.nx = -dx; hit.ny = -dy; hit.nz = -dz;
+      }
+    }
+
+    // Remote players, tested last but on equal terms — the nearest hit still wins, so a
+    // pedestrian standing in front of a friend takes the bullet exactly as you would expect.
+    for (let i = 0; i < players.length; i++) {
+      const q = players[i];
+      if (q.friendly) continue;
+      const ex = q.x - ox, ey = q.y + 0.9 - oy, ez = q.z - oz;
+      const along = ex * dx + ey * dy + ez * dz;
+      if (along < -1.5 || along > bestT + 1.2) continue;
+      const lat = Math.hypot(ex - dx * along, ey - dy * along, ez - dz * along);
+      if (lat > 1.2) continue;
+
+      const th = raySphere(ox, oy, oz, dx, dy, dz, q.x, q.y + 1.64, q.z, 0.17);
+      const tt = raySphere(ox, oy, oz, dx, dy, dz, q.x, q.y + 1.15, q.z, 0.3);
+      const tl = raySphere(ox, oy, oz, dx, dy, dz, q.x, q.y + 0.5, q.z, 0.26);
+      let t = -1, head = false;
+      if (th >= 0) { t = th; head = true; }
+      if (tt >= 0 && (t < 0 || tt < t)) { t = tt; head = false; }
+      if (tl >= 0 && (t < 0 || tl < t)) { t = tl; head = false; }
+      if (t >= 0 && t < bestT) {
+        bestT = t;
+        hit.kind = 'player';
+        hit.ped = null;
+        hit.veh = null;
+        hit.netId = q.id;
         hit.head = head;
         hit.nx = -dx; hit.ny = -dy; hit.nz = -dz;
       }

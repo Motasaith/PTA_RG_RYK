@@ -28,6 +28,32 @@ export function Hud({
         <i className="t t4" />
       </div>
 
+      {/* match score — the one thing that has to be legible without looking away from the fight */}
+      {hud.netMode === 1 && hud.netMatch !== 0 && (
+        <div className={`matchbar${hud.netMatch === 2 ? ' over' : ''}`}>
+          <span className={`side t1${hud.netTeam === 1 ? ' mine' : ''}`}>
+            <b>{hud.netScoreA}</b> GREEN
+          </span>
+          <span className="target">/{hud.netTarget}</span>
+          <span className={`side t2${hud.netTeam === 2 ? ' mine' : ''}`}>
+            ORANGE <b>{hud.netScoreB}</b>
+          </span>
+        </div>
+      )}
+
+      {/* kill feed */}
+      {hud.netFeed.length > 0 && (
+        <div className="killfeed">
+          {hud.netFeed.map((k, i) => (
+            <div className="killrow" key={`${k.at}-${i}`}>
+              <span className={`nm t${k.killerTeam}`}>{k.killer || 'The city'}</span>
+              <span className="verb">{k.flags & 2 ? '✘' : k.flags & 4 ? '⛟' : '▸'}</span>
+              <span className={`nm t${k.victimTeam}`}>{k.victim}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* objective + toast */}
       <div className="topcentre">
         {hud.objective && <div className="objective">{hud.objective}</div>}

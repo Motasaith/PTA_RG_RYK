@@ -129,10 +129,18 @@ One cap of 8 covers everything. Bandwidth is not the constraint — a full 8-pla
 is 102 bytes. The limit is rendering ~11 draw calls per character and keeping a fight
 readable. 16 would be about 32 KB/s, still trivial, if bigger matches are wanted.
 
-**Lobby flow for team modes:** the host creates one room and sends the code to *everyone*,
-their own side and the opposition. Everyone joins the same code, picks TEAM A or TEAM B (or
-gets auto-balanced on arrival), and the host starts the match. One code, one room, both
-teams — exactly how a private lobby works in every shooter.
+**Lobby flow for team modes (implemented):** the host creates one room and sends the code to
+*everyone*, their own side and the opposition. Everyone joins the same code and is
+auto-balanced onto GREEN or ORANGE on arrival; you may switch sides, but only while it does
+not leave one team two or more players larger. The host presses START TEAM DEATHMATCH and
+first to 25 kills wins. One code, one room, both teams — exactly how a private lobby works in
+every shooter.
+
+Teams are GREEN and ORANGE rather than the usual red and green, because red/green is the pair
+most colour-blind players cannot separate and team identity has to be readable at a glance.
+
+Free-roam is the same room with teams set to 0, where nobody can hurt anybody. The host can
+start a match and drop back to free-roam without anyone reconnecting.
 
 ### Finding strangers
 
@@ -179,8 +187,14 @@ and that mode pays for the duration it uses.
 
 ### What is implemented
 
-- Binary frames. A client state frame is **14 bytes**; a full 8-player snapshot is
-  **102 bytes**. Each client uploads ~**280 B/s**.
+- Binary frames. A client state frame is **16 bytes**; a full 8-player snapshot is
+  **118 bytes**. Each client uploads ~**320 B/s** of player state.
+- **Teams and PvP.** Protocol v2 carries a team, health and the vehicle a player is
+  driving. In a match you can shoot, melee and run over the other side; friendly fire is
+  off and enforced *on the server*, so a modified client cannot switch it on.
+- **A shared world.** One client is named traffic host by the server and broadcasts the
+  moving cars (~5.8 KB/s for 48 cars at 10 Hz). Everyone else replays them, interpolated
+  at the same 110 ms delay as players.
 - Positions quantised to 2 cm in an int16 (±655 m), yaw to ~0.01 degrees.
 - Remote players are rendered **110 ms in the past**, interpolated between two snapshots we
   already hold. Past the newest sample it **holds** the last pose rather than extrapolating,
@@ -189,16 +203,51 @@ and that mode pays for the duration it uses.
 - Every decoder is hostile-input safe: truncated frames, over-long names, lying player
   counts, NaN and drifting yaw are all handled and covered by tests.
 - Per-socket rate limit (80 msg/s) and server-side name sanitisation.
-- Full snapshots, not delta-encoded: at 102 bytes for a full room, delta compression would
+- Full snapshots, not delta-encoded: at 118 bytes for a full room, delta compression would
   add complexity for no measurable gain. It becomes worthwhile if the cap rises.
+
+### Who decides what
+
+The room is still a relay, but three things are decided by the server, because leaving them
+to clients produces *disagreement* rather than cheating — and all three are event-driven, so
+none of them costs a tick loop or breaks hibernation:
+
+| Decided by the server | Why it cannot be a client |
+|---|---|
+| Team assignment | Clients picking their own side end up 5v1 |
+| The score | Two clients tallying kills independently drift apart on the first dropped frame |
+| Who is traffic host | Exactly one client may own the ambient cars |
+
+Everything else stays client-reported. **Damage is applied by the victim**: the shooter
+reports "I hit player N", the server forwards it to N alone, and N subtracts its own health
+and reports its own death. One machine owning a player's health is what stops two
+simultaneous shooters each subtracting from a stale copy and killing them twice — and it
+means a kill is counted exactly once however many people were firing.
+
+### What is shared and what is not
+
+| | Shared | Notes |
+|---|---|---|
+| Players | yes | position, pose, weapon, team, health |
+| The car a player drives | yes | kind and colour travel in their state |
+| Moving ambient traffic | yes | host-owned, capped at 48 cars |
+| Parked cars | no | deterministic from their own seed, so they match anyway |
+| Pedestrians | no | ~60 humanoids would cost more than everything else combined |
+
+Parked cars are the honest caveat: they are placed identically on every machine from a
+dedicated RNG stream, but if you nudge one with your bumper it moves only on your screen
+until somebody drives it — at which point the driver claims it and it syncs properly.
+
+Ambient traffic is capped at 48 cars for everyone in a room regardless of quality preset,
+because the host sends all of them and the count cannot depend on one player's settings.
 
 ### Milestones
 
 | # | Deliverable | Why this order |
 |---|---|---|
 | **1** DONE | Rooms + presence. Join a code, see friends running around the existing city | Proves transport, interpolation and reconciliation with zero hit-registration risk |
-| **2** | Vehicles synced + **rickshaw derby** mode | Physics sync, still forgiving — a 50 ms error is invisible |
-| **3** | Shooting: server-side hit registration + lag compensation | The genuinely hard part, on a foundation that already works |
+| **2** DONE | Vehicles synced + host-owned ambient traffic | Physics sync, still forgiving — a 50 ms error is invisible |
+| **3** PARTLY | Shooting: teams, PvP damage, kill feed and score. **Not** yet server-side hit registration or lag compensation | Playable against friends now; the authoritative tick is what competitive play would still need |
 | **4** | Arena maps **with interiors** + round logic (2v2) | The Valorant-ish mode. Needs a new hand-authored map builder |
 | **5** | Prop hunt · cops & robbers · battle-royale zone | Cheap once 1–4 exist; they are rule changes, not new tech |
 

@@ -388,6 +388,128 @@ input[type="range"]::-moz-range-thumb {
   opacity: .45;
   margin: 2px 0;
 }
+/* ── teams, match and roster ───────────────────────────────────────────────
+   Green and orange rather than the usual red and green: red/green is the pair
+   most colour-blind players cannot separate, and team identity has to be
+   readable at a glance or the whole mode falls apart. */
+.t1, .netrow.t1 .tm { color: #53e07a; }
+.t2, .netrow.t2 .tm { color: #ffa63d; }
+
+.netmatch {
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .04);
+}
+.netscore {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font: 700 20px/1 ui-monospace, monospace;
+}
+.netscore .sep { opacity: .35; }
+
+.netmodes,
+.netteams {
+  display: flex;
+  gap: 8px;
+}
+.netmodes > .btn,
+.netteams > .btn { flex: 1; }
+.netmodes > .btn.on {
+  border-color: rgba(125, 243, 255, .55);
+  color: #7df3ff;
+}
+.netteams > .btn.teamA.on {
+  border-color: rgba(83, 224, 122, .6);
+  color: #53e07a;
+}
+.netteams > .btn.teamB.on {
+  border-color: rgba(255, 166, 61, .6);
+  color: #ffa63d;
+}
+
+.netroster {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.netroster > em {
+  font-size: 11px;
+  opacity: .45;
+  padding: 2px 9px;
+}
+.netrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  padding: 5px 9px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, .05);
+  border: 1px solid rgba(255, 255, 255, .08);
+}
+.netrow.me { border-color: rgba(125, 243, 255, .38); }
+.netrow .nm { flex: 1; }
+.netrow .tm {
+  font-size: 9px;
+  letter-spacing: .16em;
+}
+.netrow .kd {
+  font-family: ui-monospace, monospace;
+  opacity: .7;
+  min-width: 42px;
+  text-align: right;
+}
+
+/* ── in-game match HUD ─────────────────────────────────────────────────────── */
+.matchbar {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 16px;
+  border-radius: 20px;
+  background: rgba(6, 10, 14, .55);
+  border: 1px solid rgba(255, 255, 255, .1);
+  font: 600 12px/1 ui-monospace, monospace;
+  letter-spacing: .12em;
+}
+.matchbar.over { border-color: rgba(255, 209, 102, .5); }
+.matchbar b { font-size: 18px; }
+/* Your own side is the one you need to find first, so it is the only one at full weight. */
+.matchbar .side { opacity: .62; }
+.matchbar .side.mine { opacity: 1; }
+.matchbar .target {
+  font-size: 9px;
+  opacity: .4;
+}
+
+.killfeed {
+  position: absolute;
+  top: 56px;
+  right: 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  pointer-events: none;
+}
+.killrow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(6, 10, 14, .55);
+  font: 600 11px/1 ui-monospace, monospace;
+}
+.killrow .nm.t0 { color: #7df3ff; }
+.killrow .verb { opacity: .55; }
+
 .neterr {
   font-size: 11px;
   color: #ff8a7a;
